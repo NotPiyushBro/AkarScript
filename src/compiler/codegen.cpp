@@ -1116,12 +1116,27 @@ size_t CodeGenerator::emit_jump(uint8_t op, uint8_t a, int16_t offset) {
 
 void CodeGenerator::patch_jump(size_t jump_byte_pos, int16_t offset) {
     auto& bc = current_scope_->function->bytecode;
-    // The jump instruction starts at jump_byte_pos
-    // Normal format: [op:8][A:8][BX:16] at bytes [pos..pos+3]
-    // We need to patch the BX field (bytes at pos+2 and pos+3)
+    // Callers compute offset = current_offset - jump_byte_pos - INST_SIZE (4)
+    // For WIDE instructions, the correct offset is current_offset - jump_byte_pos - WIDE_INST_SIZE (8)
+    // So we need to subtract (WIDE_INST_SIZE - INST_SIZE) = 4 from the offset
+    if (bc[jump_byte_pos] == op_byte(Opcode::WIDE)) {
+        offset = static_cast<int16_t>(offset - (WIDE_INST_SIZE - INST_SIZE));
+    }
     uint16_t uoffset = static_cast<uint16_t>(offset);
-    bc[jump_byte_pos + 2] = static_cast<uint8_t>((uoffset >> 8) & 0xFF);
-    bc[jump_byte_pos + 3] = static_cast<uint8_t>(uoffset & 0xFF);
+    if (bc[jump_byte_pos] == op_byte(Opcode::WIDE)) {
+        // Wide format: [WIDE][op][A:16][B:16][C:16] = 8 bytes
+        // BX is split: B gets high byte, C gets low byte (matching emit_bx behavior)
+        // Byte 4: B_high, Byte 5: B_low, Byte 6: C_high, Byte 7: C_low
+        bc[jump_byte_pos + 4] = 0;
+        bc[jump_byte_pos + 5] = static_cast<uint8_t>((uoffset >> 8) & 0xFF);
+        bc[jump_byte_pos + 6] = 0;
+        bc[jump_byte_pos + 7] = static_cast<uint8_t>(uoffset & 0xFF);
+    } else {
+        // Normal format: [op][A][B][C] = 4 bytes
+        // BX offset is in B:8|C:8 = bytes 2-3
+        bc[jump_byte_pos + 2] = static_cast<uint8_t>((uoffset >> 8) & 0xFF);
+        bc[jump_byte_pos + 3] = static_cast<uint8_t>(uoffset & 0xFF);
+    }
 }
 
 size_t CodeGenerator::current_offset() const {

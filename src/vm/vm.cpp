@@ -1418,6 +1418,33 @@ InterpretResult VM::run() {
             case Opcode::LOAD_FALSE: S(wa) = Value(false); break;
             case Opcode::MOVE: S(wa) = S(wb); break;
             case Opcode::GET_LOCAL: S(wa) = stack_[frame->base_register + wb]; break;
+            case Opcode::GET_GLOBAL: {
+                uint16_t bx = (wb << 8) | wc;
+                auto& constants = frame->closure->function->constants;
+                if (bx >= constants.size() || !constants[bx].is_string()) {
+                    runtime_error("Invalid global name");
+                    RETURN_RUNTIME_ERROR;
+                }
+                ObjString* name = constants[bx].as_string();
+                auto it = globals_.find(name->value);
+                if (it == globals_.end()) {
+                    runtime_error("Undefined variable '%s'", name->value.c_str());
+                    RETURN_RUNTIME_ERROR;
+                }
+                S(wa) = it->second;
+                break;
+            }
+            case Opcode::SET_GLOBAL: {
+                uint16_t bx = (wb << 8) | wc;
+                auto& constants = frame->closure->function->constants;
+                if (bx >= constants.size() || !constants[bx].is_string()) {
+                    runtime_error("Invalid global name");
+                    RETURN_RUNTIME_ERROR;
+                }
+                ObjString* name = constants[bx].as_string();
+                globals_[name->value] = S(wa);
+                break;
+            }
             case Opcode::SET_LOCAL: stack_[frame->base_register + wb] = S(wa); break;
             case Opcode::GET_UPVALUE: {
                 auto* uv = frame->closure->upvalues[wb];
@@ -1550,6 +1577,26 @@ InterpretResult VM::run() {
                 stack_top_ = std::max(caller_top, callee_pos + 1);
                 stack_[callee_pos] = result;
                 REFRESH_FRAME();
+                break;
+            }
+            case Opcode::JMP: {
+                int16_t offset = static_cast<int16_t>((wb << 8) | wc);
+                // WIDE handler already advanced ip by WIDE_INST_SIZE, undo it
+                frame->ip = wip + offset;
+                break;
+            }
+            case Opcode::JMP_IF_FALSE: {
+                int16_t offset = static_cast<int16_t>((wb << 8) | wc);
+                if (!S(wa).is_truthy()) {
+                    frame->ip += offset;
+                }
+                break;
+            }
+            case Opcode::JMP_IF_TRUE: {
+                int16_t offset = static_cast<int16_t>((wb << 8) | wc);
+                if (S(wa).is_truthy()) {
+                    frame->ip += offset;
+                }
                 break;
             }
             default:
