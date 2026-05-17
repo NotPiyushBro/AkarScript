@@ -1,0 +1,118 @@
+#pragma once
+#include <cstdint>
+
+namespace akar {
+
+// Register-based bytecode opcodes
+// Format: [opcode:8] [A:8] [B:8] [C:8]
+// For some ops, B and C are combined as a 16-bit operand (BX)
+enum class Opcode : uint8_t {
+    // Load/store
+    LOAD_CONST,     // A = constants[BX] (B<<8|C)
+    LOAD_NIL,       // A = nil
+    LOAD_TRUE,      // A = true
+    LOAD_FALSE,     // A = false
+
+    // Register ops
+    MOVE,           // A = R[B]
+    // Stack ops (for function calls)
+    GET_LOCAL,      // A = stack[BP + B]
+    SET_LOCAL,      // stack[BP + B] = A
+    GET_UPVALUE,    // A = upvalue[B]
+    SET_UPVALUE,    // upvalue[B] = A
+    GET_GLOBAL,     // A = globals[name_at_B]
+    SET_GLOBAL,     // globals[name_at_B] = A
+
+    // Arithmetic
+    ADD,            // A = R[B] + R[C]
+    SUB,            // A = R[B] - R[C]
+    MUL,            // A = R[B] * R[C]
+    DIV,            // A = R[B] / R[C]
+    MOD,            // A = R[B] % R[C]
+    NEG,            // A = -R[B]
+
+    // Comparison
+    EQ,             // A = R[B] == R[C]
+    NEQ,            // A = R[B] != R[C]
+    LT,             // A = R[B] < R[C]
+    LTE,            // A = R[B] <= R[C]
+    GT,             // A = R[B] > R[C]
+    GTE,            // A = R[B] >= R[C]
+
+    // Logical
+    NOT,            // A = !R[B]
+
+    // Control flow
+    JMP,            // PC += signed_offset in BX (B<<8|C, interpreted as signed)
+    JMP_IF_FALSE,   // if (!R[A]) PC += signed_offset in BX
+    JMP_IF_TRUE,    // if (R[A]) PC += signed_offset in BX
+
+    // Functions
+    CALL,           // R[A] = R[A](R[A+1], ..., R[A+B])  B = arg_count
+    CLOSURE,        // A = closure(constants[BX]) with upvalues in following slots
+    CLOSE_UPVALUE,  // close upvalues at stack depth A
+    RETURN,         // return R[A]
+
+    // Data structures
+    NEW_ARRAY,      // A = new array; elements from R[A+1]..R[A+B]
+    NEW_MAP,        // A = new map; key-value pairs from stack
+    GET_INDEX,      // A = R[B][R[C]]
+    SET_INDEX,      // R[A][R[B]] = R[C]
+    GET_FIELD,      // A = R[B].field_name_constant_C
+    SET_FIELD,      // R[A].field_name_constant_B = R[C]
+
+    // Class/object
+    NEW_CLASS,      // A = new class(name_constant_BX)
+    NEW_INSTANCE,   // A = new instance of R[B]
+    GET_METHOD,     // A = R[B].method_name_C
+    INVOKE,         // A = R[B].method_name_C(args: R[B+1]..R[B+D]), D in high bits
+
+    // Range
+    NEW_RANGE,      // A = range(R[B], R[C])
+
+    // Iterator (for "for x in collection")
+    ITER_INIT,      // A = iterator(R[B])
+    ITER_NEXT,      // A = iter_next(R[B]); sets done flag
+    ITER_DONE,      // A = iter_done(R[B])
+
+    // Special
+    PRINT,          // print R[A]
+    HALT,           // stop execution
+    NOP,            // no operation
+
+    // Fiber/Coroutine
+    FIBER_YIELD,    // yield R[A] from current fiber, resume value goes to R[A]
+    FIBER_RESUME,   // resume fiber R[B], pass R[C] as resume value, result in R[A]
+
+    // Tail call optimization
+    TAIL_CALL,      // R[A] = R[A](R[A+1], ..., R[A+B]) reusing current frame. B = arg_count
+
+    // Await
+    AWAIT,          // if R[A] is nil, return (suspend fiber); otherwise continue
+
+    // Exception handling
+    THROW,          // throw R[A] as exception
+    TRY_BEGIN,      // mark start of try block, BX = catch offset
+    TRY_END,        // mark end of try block
+};
+
+inline uint8_t op_byte(Opcode op) { return static_cast<uint8_t>(op); }
+
+// Encode instruction
+inline uint32_t make_instruction(Opcode op, uint8_t a, uint8_t b, uint8_t c) {
+    return (op_byte(op) << 24) | (a << 16) | (b << 8) | c;
+}
+
+inline uint32_t make_instruction_bx(Opcode op, uint8_t a, uint16_t bx) {
+    return (op_byte(op) << 24) | (a << 16) | bx;
+}
+
+// Decode
+inline uint8_t get_op(uint32_t inst) { return (inst >> 24) & 0xFF; }
+inline uint8_t get_a(uint32_t inst) { return (inst >> 16) & 0xFF; }
+inline uint8_t get_b(uint32_t inst) { return (inst >> 8) & 0xFF; }
+inline uint8_t get_c(uint32_t inst) { return inst & 0xFF; }
+inline uint16_t get_bx(uint32_t inst) { return inst & 0xFFFF; }
+inline int16_t get_signed_bx(uint32_t inst) { return static_cast<int16_t>(inst & 0xFFFF); }
+
+} // namespace akar

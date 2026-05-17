@@ -1,0 +1,30 @@
+# Build
+build/
+cmake-build-*/
+
+# Code review graph
+.code-review-graph/
+
+# IDE / Editor
+.cache/
+.kiro/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# MCP / Claude
+.claude/
+.mcp.json
+
+# Editor configs
+.cursorrules
+.opencode.json
+.windsurfrules
+
+# Compiled
+*.o
+*.a
+*.so
+*.dylib
+*.exe
