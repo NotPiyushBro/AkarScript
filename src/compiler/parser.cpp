@@ -296,8 +296,8 @@ ASTPtr Parser::expression() {
 ASTPtr Parser::assignment() {
     auto expr = or_expr();
     if (match(TokenType::Equal)) {
-        auto value = assignment();
         int line = previous().line;
+        auto value = assignment();
         if (expr->type == NodeType::Identifier) {
             auto name = static_cast<Identifier*>(expr.get())->name;
             return std::make_shared<AssignmentExpr>(name, value, line);
@@ -316,8 +316,9 @@ ASTPtr Parser::assignment() {
 ASTPtr Parser::or_expr() {
     auto expr = and_expr();
     while (match(TokenType::Or)) {
+        int line = previous().line;
         auto right = and_expr();
-        expr = std::make_shared<LogicalExpr>(expr, "or", right, previous().line);
+        expr = std::make_shared<LogicalExpr>(expr, "or", right, line);
     }
     return expr;
 }
@@ -325,8 +326,9 @@ ASTPtr Parser::or_expr() {
 ASTPtr Parser::and_expr() {
     auto expr = equality();
     while (match(TokenType::And)) {
+        int line = previous().line;
         auto right = equality();
-        expr = std::make_shared<LogicalExpr>(expr, "and", right, previous().line);
+        expr = std::make_shared<LogicalExpr>(expr, "and", right, line);
     }
     return expr;
 }
@@ -335,8 +337,9 @@ ASTPtr Parser::equality() {
     auto expr = comparison();
     while (match_any({TokenType::EqualEqual, TokenType::BangEqual})) {
         auto op = previous().lexeme;
+        int line = previous().line;
         auto right = comparison();
-        expr = std::make_shared<BinaryExpr>(expr, op, right, previous().line);
+        expr = std::make_shared<BinaryExpr>(expr, op, right, line);
     }
     return expr;
 }
@@ -345,8 +348,9 @@ ASTPtr Parser::comparison() {
     auto expr = range();
     while (match_any({TokenType::Less, TokenType::LessEqual, TokenType::Greater, TokenType::GreaterEqual})) {
         auto op = previous().lexeme;
+        int line = previous().line;
         auto right = range();
-        expr = std::make_shared<BinaryExpr>(expr, op, right, previous().line);
+        expr = std::make_shared<BinaryExpr>(expr, op, right, line);
     }
     return expr;
 }
@@ -354,9 +358,10 @@ ASTPtr Parser::comparison() {
 ASTPtr Parser::range() {
     auto expr = addition();
     if (match(TokenType::DotDot)) {
+        int line = previous().line;
         bool inclusive = match(TokenType::Equal);
         auto end = addition();
-        expr = std::make_shared<RangeExpr>(expr, end, inclusive, previous().line);
+        expr = std::make_shared<RangeExpr>(expr, end, inclusive, line);
     }
     return expr;
 }
@@ -365,8 +370,9 @@ ASTPtr Parser::addition() {
     auto expr = multiplication();
     while (match_any({TokenType::Plus, TokenType::Minus})) {
         auto op = previous().lexeme;
+        int line = previous().line;
         auto right = multiplication();
-        expr = std::make_shared<BinaryExpr>(expr, op, right, previous().line);
+        expr = std::make_shared<BinaryExpr>(expr, op, right, line);
     }
     return expr;
 }
@@ -375,8 +381,9 @@ ASTPtr Parser::multiplication() {
     auto expr = unary();
     while (match_any({TokenType::Star, TokenType::Slash, TokenType::Percent})) {
         auto op = previous().lexeme;
+        int line = previous().line;
         auto right = unary();
-        expr = std::make_shared<BinaryExpr>(expr, op, right, previous().line);
+        expr = std::make_shared<BinaryExpr>(expr, op, right, line);
     }
     return expr;
 }
@@ -384,8 +391,9 @@ ASTPtr Parser::multiplication() {
 ASTPtr Parser::unary() {
     if (match_any({TokenType::Minus, TokenType::Bang, TokenType::Not})) {
         auto op = previous().lexeme;
+        int line = previous().line;
         auto operand = unary();
-        return std::make_shared<UnaryExpr>(op, operand, previous().line);
+        return std::make_shared<UnaryExpr>(op, operand, line);
     }
     return call();
 }

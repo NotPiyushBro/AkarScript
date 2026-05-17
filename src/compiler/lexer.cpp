@@ -92,6 +92,7 @@ Token Lexer::next_token() {
     if (is_at_end()) return make_token(TokenType::Eof);
 
     start_ = current_;
+    start_column_ = column_;
     char c = advance();
 
     if (std::isalpha(c) || c == '_') return read_identifier();
@@ -139,11 +140,11 @@ Token Lexer::next_token() {
 }
 
 Token Lexer::make_token(TokenType type) {
-    return Token(type, source_.substr(start_, current_ - start_), line_, column_);
+    return Token(type, source_.substr(start_, current_ - start_), line_, start_column_);
 }
 
 Token Lexer::make_token(TokenType type, const std::string& lexeme) {
-    return Token(type, lexeme, line_, column_);
+    return Token(type, lexeme, line_, start_column_);
 }
 
 Token Lexer::error_token(const std::string& message) {

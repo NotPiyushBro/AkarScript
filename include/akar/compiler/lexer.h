@@ -35,6 +35,7 @@ private:
     int current_ = 0;
     int line_ = 1;
     int column_ = 1;
+    int start_column_ = 1;
 };
 
 } // namespace akar
