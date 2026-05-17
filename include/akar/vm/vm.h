@@ -56,13 +56,29 @@ public:
     // Get last error
     const std::string& last_error() const { return last_error_; }
 
+    // Verbose logging
+    bool verbose_ = false;
+    void set_verbose(bool v) { verbose_ = v; }
+
     // GC
     void mark_roots();
     void collect_garbage();
 
-    // Fiber yield support (used by native yield function)
+    // Fiber yield support
     bool yield_pending_ = false;
     Value yield_value_;
+    ObjFiber* active_fiber_ = nullptr; // currently running fiber
+
+    // Deferred fiber resume (set by native fiber_resume, handled by run loop)
+    bool resume_pending_ = false;
+    ObjFiber* resume_fiber_ = nullptr;
+    Value resume_value_;
+    bool resume_has_value_ = false;
+    int resume_return_reg_ = 0;
+    int resume_arg_count_ = 0;
+    // Skip native call on fiber resume (CALL handler checks this)
+    bool skip_native_call_ = false;
+    Value skip_native_result_;
 
 private:
     InterpretResult run();

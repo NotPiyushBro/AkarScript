@@ -58,6 +58,13 @@ void VM::mark_roots() {
     }
     // Mark yield value
     gc_mark_value(yield_value_);
+    // Mark active fiber and pending resume fiber
+    if (active_fiber_) {
+        gc_mark_object(static_cast<Obj*>(active_fiber_));
+    }
+    if (resume_fiber_) {
+        gc_mark_object(static_cast<Obj*>(resume_fiber_));
+    }
 }
 
 void VM::collect_garbage() {
@@ -146,6 +153,46 @@ InterpretResult VM::run() {
 
     // GC check counter (check every 1024 opcodes to keep overhead low)
     int opcode_counter = 0;
+    // Fiber yield handling - saves state and unwinds (safety net)
+    #define HANDLE_FIBER_YIELD() do { \
+        if (yield_pending_ && active_fiber_) { \
+            ObjFiber* fib = active_fiber_; \
+            int save_start = frames_[fib->frame_base].callee_stack_pos; \
+            fib->saved_stack.clear(); \
+            for (int _i = save_start; _i < stack_top_; _i++) { \
+                fib->saved_stack.push_back(stack_[_i]); \
+            } \
+            fib->saved_stack_top = (int)fib->saved_stack.size(); \
+            fib->saved_frame_count = frame_count_ - fib->frame_base; \
+            fib->saved_caller_stack_top = frames_[fib->frame_base].caller_stack_top; \
+            fib->saved_frames.clear(); \
+            for (int _i = fib->frame_base; _i < frame_count_; _i++) { \
+                ObjFiber::SavedFrame sf; \
+                sf.base_register = frames_[_i].base_register - save_start; \
+                sf.return_register = frames_[_i].return_register; \
+                sf.callee_stack_pos = frames_[_i].callee_stack_pos - save_start; \
+                sf.caller_stack_top = frames_[_i].caller_stack_top; \
+                sf.ip_offset = (int)(frames_[_i].ip - frames_[_i].closure->function->bytecode.data()); \
+                if (_i == frame_count_ - 1) sf.ip_offset -= 4; \
+                fib->saved_frames.push_back(sf); \
+            } \
+            fib->saved_open_upvalues = open_upvalues_; \
+            open_upvalues_ = nullptr; \
+            fib->state = ObjFiber::State::Suspended; \
+            active_fiber_ = fib->parent; \
+            fib->parent = nullptr; \
+            /* Return the yield value to the caller (like RETURN opcode) */ \
+            int callee_pos = frames_[fib->frame_base].callee_stack_pos; \
+            int caller_top = frames_[fib->frame_base].caller_stack_top; \
+            frame_count_ = fib->frame_base; \
+            stack_top_ = std::max(caller_top, callee_pos + 1); \
+            stack_[callee_pos] = yield_value_; \
+            REFRESH_FRAME(); \
+            yield_pending_ = false; \
+            goto loop_continue; \
+        } \
+    } while(0)
+
     #define CHECK_MEMORY_LIMIT() do { \
         if (++opcode_counter >= 1024) { \
             opcode_counter = 0; \
@@ -158,6 +205,29 @@ InterpretResult VM::run() {
             } \
         } \
     } while(0)
+
+    // Verbose logging macro - only prints when -v flag is set
+    #define VLOG(...) do { if (verbose_) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
+    // Helper to get IP offset from bytecode start
+    #define IP_OFFSET() (int)(frame->ip - frame->closure->function->bytecode.data())
+
+    // Opcode name table for verbose output
+    static const char* opcode_names[] = {
+        "LOAD_CONST", "LOAD_NIL", "LOAD_TRUE", "LOAD_FALSE",
+        "MOVE", "GET_LOCAL", "SET_LOCAL", "GET_UPVALUE", "SET_UPVALUE",
+        "GET_GLOBAL", "SET_GLOBAL",
+        "ADD", "SUB", "MUL", "DIV", "MOD", "NEG",
+        "EQ", "NEQ", "LT", "LTE", "GT", "GTE", "NOT",
+        "JMP", "JMP_IF_FALSE", "JMP_IF_TRUE",
+        "CALL", "CLOSURE", "CLOSE_UPVALUE", "RETURN",
+        "NEW_ARRAY", "NEW_MAP", "GET_INDEX", "SET_INDEX",
+        "GET_FIELD", "SET_FIELD",
+        "NEW_CLASS", "NEW_INSTANCE", "GET_METHOD", "INVOKE",
+        "NEW_RANGE", "ITER_INIT", "ITER_NEXT", "ITER_DONE",
+        "PRINT", "HALT", "NOP",
+        "FIBER_YIELD", "FIBER_RESUME", "TAIL_CALL",
+        "AWAIT", "THROW", "TRY_BEGIN", "TRY_END",
+    };
 
 #ifdef __GNUC__
     // Computed goto dispatch table
@@ -178,7 +248,14 @@ InterpretResult VM::run() {
         &&op_AWAIT, &&op_THROW, &&op_TRY_BEGIN, &&op_TRY_END,
     };
 
-    #define DISPATCH() do { CHECK_MEMORY_LIMIT(); goto *dispatch_table[frame->ip[0]]; } while(0)
+    #define DISPATCH() do { \
+        HANDLE_FIBER_YIELD(); \
+        CHECK_MEMORY_LIMIT(); \
+        VLOG("[VM] ip=%d %s a=%d b=%d c=%d base=%d top=%d frames=%d\n", \
+             IP_OFFSET(), opcode_names[frame->ip[0]], frame->ip[1], frame->ip[2], frame->ip[3], \
+             base, stack_top_, frame_count_); \
+        goto *dispatch_table[frame->ip[0]]; \
+    } while(0)
     #define CASE(op) op_##op
 
     for (;;) {
@@ -494,17 +571,151 @@ InterpretResult VM::run() {
         uint8_t a = frame->ip[1];
         uint8_t b = frame->ip[2];
         frame->ip += 4;
+
+        if (skip_native_call_) {
+            skip_native_call_ = false;
+            S(a) = skip_native_result_;
+            DISPATCH();
+        }
+
         int arg_count = b;
         int callee_abs = base + a;
         Value callee = stack_[callee_abs];
+        VLOG("[CALL] a=%d args=%d callee_abs=%d callee=%s\n", a, arg_count, callee_abs, callee.to_string().c_str());
         if (callee.is_closure()) {
             if (!call(callee.as_closure(), arg_count, a, callee_abs)) {
                 RETURN_RUNTIME_ERROR;
             }
             REFRESH_FRAME();
         } else if (callee.is_native()) {
+            // Special case: fiber_yield - handle directly without calling native
+            if (active_fiber_ && callee.as_native()->name == "fiber_yield") {
+                ObjFiber* fib = active_fiber_;
+                // Get the yield value from the first argument
+                Value yval = (arg_count >= 1) ? stack_[callee_abs + 1] : Value();
+                VLOG("[FIBER_YIELD] value=%s a=%d base=%d stack_top=%d frames=%d frame_base=%d\n", yval.to_string().c_str(), a, base, stack_top_, frame_count_, fib->frame_base);
+                // Save the fiber's own stack and frames (from the fiber's entry callee position)
+                int save_start = frames_[fib->frame_base].callee_stack_pos;
+                fib->saved_stack.clear();
+                for (int _i = save_start; _i < stack_top_; _i++) {
+                    fib->saved_stack.push_back(stack_[_i]);
+                }
+                fib->saved_stack_top = (int)fib->saved_stack.size();
+                fib->saved_frame_count = frame_count_ - fib->frame_base;
+                fib->saved_caller_stack_top = frames_[fib->frame_base].caller_stack_top;
+                fib->saved_frames.clear();
+                for (int _i = fib->frame_base; _i < frame_count_; _i++) {
+                    ObjFiber::SavedFrame sf;
+                    sf.base_register = frames_[_i].base_register - save_start;
+                    sf.return_register = frames_[_i].return_register;
+                    sf.callee_stack_pos = frames_[_i].callee_stack_pos - save_start;
+                    sf.caller_stack_top = frames_[_i].caller_stack_top;
+                    // IP points past the CALL (already advanced). On resume,
+                    // execution continues from the same CALL instruction.
+                    sf.ip_offset = (int)(frames_[_i].ip - frames_[_i].closure->function->bytecode.data());
+                    if (_i == frame_count_ - 1) sf.ip_offset -= 4;
+                    fib->saved_frames.push_back(sf);
+                }
+                fib->saved_open_upvalues = open_upvalues_;
+                open_upvalues_ = nullptr;
+                fib->state = ObjFiber::State::Suspended;
+                active_fiber_ = fib->parent;
+                fib->parent = nullptr;
+                // "Return" the yield value to the caller (like RETURN opcode)
+                int callee_pos = frames_[fib->frame_base].callee_stack_pos;
+                int caller_top = frames_[fib->frame_base].caller_stack_top;
+                frame_count_ = fib->frame_base;
+                stack_top_ = std::max(caller_top, callee_pos + 1);
+                stack_[callee_pos] = yval;
+                REFRESH_FRAME();
+                yield_pending_ = false;
+                DISPATCH();
+            }
             if (!call_native(callee.as_native(), arg_count, a, callee_abs)) {
                 RETURN_RUNTIME_ERROR;
+            }
+            // Handle fiber yield after other native calls (e.g. from a native that calls fiber_yield)
+            if (yield_pending_ && active_fiber_) {
+                // This shouldn't happen normally since fiber_yield is handled above
+                yield_pending_ = false;
+            }
+            // Check for deferred fiber resume (set by native fiber_resume)
+            if (resume_pending_) {
+                resume_pending_ = false;
+                ObjFiber* fib = resume_fiber_;
+                resume_fiber_ = nullptr;
+                resume_return_reg_ = a; // save the return register from the CALL instruction
+                // Reset stack to before the native call (clear the placeholder nil)
+                stack_top_ = callee_abs;
+                VLOG("[FIBER_RESUME] state=%d saved_stack=%zu saved_frames=%d\n", (int)fib->state, fib->saved_stack.size(), fib->saved_frame_count);
+                if (fib->state == ObjFiber::State::Suspended) {
+                    // Restore saved state from fiber
+                    // Use callee_abs as restore base (where the parent pushed the callee)
+                    int restore_base = callee_abs;
+                    stack_top_ = restore_base;
+                    for (size_t i = 0; i < fib->saved_stack.size(); i++) {
+                        stack_[stack_top_++] = fib->saved_stack[i];
+                    }
+                    int new_frame_base = frame_count_;
+                    frame_count_ = new_frame_base + fib->saved_frame_count;
+                    for (int i = 0; i < fib->saved_frame_count; i++) {
+                        auto& sf = fib->saved_frames[i];
+                        auto& f = frames_[new_frame_base + i];
+                        f.base_register = sf.base_register + restore_base;
+                        f.return_register = sf.return_register;
+                        f.callee_stack_pos = sf.callee_stack_pos + restore_base;
+                        f.caller_stack_top = sf.caller_stack_top;
+                        int closure_idx = sf.callee_stack_pos;
+                        if (closure_idx >= 0 && closure_idx < (int)fib->saved_stack.size() && fib->saved_stack[closure_idx].is_closure()) {
+                            f.closure = fib->saved_stack[closure_idx].as_closure();
+                            f.ip = f.closure->function->bytecode.data() + sf.ip_offset;
+                        }
+                        VLOG("[FIBER_RESUME] frame[%d] base=%d callee_pos=%d ip_offset=%d\n", i, f.base_register, f.callee_stack_pos, sf.ip_offset);
+                    }
+                    fib->frame_base = new_frame_base;
+                    // Update entry frame's callee_stack_pos so RETURN stores result at callee_abs
+                    frames_[new_frame_base].callee_stack_pos = callee_abs;
+                    open_upvalues_ = fib->saved_open_upvalues;
+                    fib->state = ObjFiber::State::Running;
+                    fib->parent = active_fiber_;
+                    fib->resume_return_reg = resume_return_reg_;
+                    active_fiber_ = fib;
+
+                    resume_has_value_ = false;
+                    // The IP points to the CALL instruction. The script will
+                    // re-enter the CALL handler. Set skip_native_call_ so the native
+                    // isn't called again. Place the resume value at callee_abs
+                    // (this is what `let step = fiber_yield(x)` receives as `step`).
+                    skip_native_call_ = true;
+                    skip_native_result_ = resume_value_;
+                    REFRESH_FRAME();
+                } else if (fib->state == ObjFiber::State::Created) {
+                    // Start the fiber for the first time
+                    fib->state = ObjFiber::State::Running;
+                    fib->parent = active_fiber_;
+                    fib->resume_return_reg = resume_return_reg_;
+                    active_fiber_ = fib;
+                    int callee_abs2 = stack_top_;
+                    stack_[stack_top_++] = Value(static_cast<Obj*>(fib->entry));
+                    // Use resume value if provided (and non-nil), otherwise use initial_args
+                    int arg_count = 0;
+                    if (resume_has_value_ && !resume_value_.is_nil()) {
+                        stack_[stack_top_++] = resume_value_;
+                        arg_count = 1;
+                    } else {
+                        arg_count = (int)fib->initial_args.size();
+                        for (int i = 0; i < arg_count; i++) {
+                            stack_[stack_top_++] = fib->initial_args[i];
+                        }
+                    }
+                    resume_has_value_ = false;
+                    fib->frame_base = frame_count_; // set before call() increments frame_count_
+                    if (!call(fib->entry, arg_count, resume_return_reg_, callee_abs2)) {
+                        active_fiber_ = nullptr;
+                        RETURN_RUNTIME_ERROR;
+                    }
+                    REFRESH_FRAME();
+                }
             }
         } else if (callee.is_class()) {
             auto* instance = allocate_instance(callee.as_class());
@@ -667,6 +878,7 @@ InterpretResult VM::run() {
         uint8_t a = frame->ip[1];
         frame->ip += 4;
         Value result = S(a);
+        VLOG("[RETURN] a=%d result=%s callee_pos=%d frames=%d\n", a, result.to_string().c_str(), frame->callee_stack_pos, frame_count_ - 1);
         int callee_pos = frame->callee_stack_pos;
         int saved_top = frame->caller_stack_top;
         frame_count_--;
@@ -674,6 +886,12 @@ InterpretResult VM::run() {
             stack_top_ = 0;
             stack_[stack_top_++] = result;
             return InterpretResult::Ok;
+        }
+        // If this was the last fiber frame (frame_count_ dropped to fiber's frame_base)
+        // and we have an active fiber, mark it as done
+        if (active_fiber_ && frame_count_ == active_fiber_->frame_base) {
+            active_fiber_->state = ObjFiber::State::Done;
+            active_fiber_ = active_fiber_->parent;
         }
         // Restore caller's stack_top (preserving registers above callee_pos)
         stack_top_ = std::max(saved_top, callee_pos + 1);
@@ -1083,20 +1301,14 @@ InterpretResult VM::run() {
     CASE(FIBER_YIELD): {
         uint8_t a = frame->ip[1];
         frame->ip += 4;
-        Value yielded = S(a);
-        if (frame_count_ > 0) {
-            int callee_pos = frame->callee_stack_pos;
-            frame_count_--;
-            if (frame_count_ == 0) {
-                stack_top_ = 0;
-                stack_[stack_top_++] = yielded;
-                return InterpretResult::Ok;
-            }
-            stack_top_ = callee_pos;
-            stack_[stack_top_++] = yielded;
-            REFRESH_FRAME();
+        if (skip_native_call_) {
+            skip_native_call_ = false;
+            S(a) = skip_native_result_;
+            DISPATCH();
         }
-        DISPATCH();
+        yield_pending_ = true;
+        yield_value_ = S(a);
+        DISPATCH(); // next DISPATCH will handle the actual yield via HANDLE_FIBER_YIELD
     }
     CASE(FIBER_RESUME): {
         uint8_t a = frame->ip[1];
@@ -1114,17 +1326,70 @@ InterpretResult VM::run() {
             runtime_error("Cannot resume a finished fiber");
             RETURN_RUNTIME_ERROR;
         }
-        if (fiber->state == ObjFiber::State::Created) {
-            fiber->state = ObjFiber::State::Running;
-            int callee_abs = stack_top_;
-            stack_[stack_top_++] = Value(static_cast<Obj*>(fiber->entry));
-            stack_[stack_top_++] = resume_val;
-            if (!call(fiber->entry, 1, a, callee_abs)) {
-                RETURN_RUNTIME_ERROR;
+        if (fiber->state == ObjFiber::State::Suspended) {
+            // Restore saved state from fiber into VM
+            int caller_base = frame->base_register;
+            // Restore the fiber's stack region
+            stack_top_ = caller_base;
+            for (size_t i = 0; i < fiber->saved_stack.size(); i++) {
+                stack_[stack_top_++] = fiber->saved_stack[i];
             }
+            // Restore frames at the current frame_count_ (after caller's frames)
+            int new_frame_base = frame_count_;
+            frame_count_ = new_frame_base + fiber->saved_frame_count;
+            for (int i = 0; i < fiber->saved_frame_count; i++) {
+                auto& sf = fiber->saved_frames[i];
+                auto& f = frames_[new_frame_base + i];
+                f.base_register = sf.base_register;
+                f.return_register = sf.return_register;
+                f.callee_stack_pos = sf.callee_stack_pos;
+                f.caller_stack_top = sf.caller_stack_top;
+                // Find the closure for this frame
+                // The closure is at stack_[callee_stack_pos] in the saved stack
+                int closure_idx = sf.callee_stack_pos - caller_base;
+                if (closure_idx >= 0 && closure_idx < (int)fiber->saved_stack.size() && fiber->saved_stack[closure_idx].is_closure()) {
+                    f.closure = fiber->saved_stack[closure_idx].as_closure();
+                    f.ip = f.closure->function->bytecode.data() + sf.ip_offset;
+                }
+            }
+            fiber->frame_base = new_frame_base;
+            open_upvalues_ = fiber->saved_open_upvalues;
+            fiber->state = ObjFiber::State::Running;
+            fiber->parent = active_fiber_;
+            fiber->resume_return_reg = a;
+            active_fiber_ = fiber;
+
+            // Set up resume value to be returned by the yield call
+            skip_native_call_ = true;
+            skip_native_result_ = resume_val;
+
             REFRESH_FRAME();
+            DISPATCH();
         }
-        S(a) = resume_val;
+        // Created state: start the fiber
+        fiber->state = ObjFiber::State::Running;
+        fiber->parent = active_fiber_;
+        fiber->resume_return_reg = a;
+        active_fiber_ = fiber;
+        int callee_abs = stack_top_;
+        stack_[stack_top_++] = Value(static_cast<Obj*>(fiber->entry));
+        // Use resume value if provided
+        int arg_count = 0;
+        if (!resume_val.is_nil()) {
+            stack_[stack_top_++] = resume_val;
+            arg_count = 1;
+        } else {
+            arg_count = (int)fiber->initial_args.size();
+            for (int i = 0; i < arg_count; i++) {
+                stack_[stack_top_++] = fiber->initial_args[i];
+            }
+        }
+        fiber->frame_base = frame_count_; // set before call() increments frame_count_
+        if (!call(fiber->entry, arg_count, a, callee_abs)) {
+            active_fiber_ = nullptr;
+            RETURN_RUNTIME_ERROR;
+        }
+        REFRESH_FRAME();
         DISPATCH();
     }
 
@@ -1134,6 +1399,7 @@ InterpretResult VM::run() {
     // Fallback: switch-based dispatch for non-GCC compilers
     for (;;) {
     loop_continue:
+        HANDLE_FIBER_YIELD();
         CHECK_MEMORY_LIMIT();
         uint8_t instruction = frame->ip[0];
         Opcode op = static_cast<Opcode>(instruction);

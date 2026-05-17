@@ -211,18 +211,25 @@ struct ObjFiber : Obj {
     ObjClosure* entry = nullptr;
     Value yielded_value;
     Value resume_value;
-    // Saved stack state (only saved on yield, restored on resume)
+    // Initial args from fiber_create (passed on first resume)
+    std::vector<Value> initial_args;
+    // Saved stack state (saved on yield, restored on resume)
     std::vector<Value> saved_stack;
     int saved_stack_top = 0;
     int saved_frame_count = 0;
-    // We store minimal frame info for resumption
+    int saved_caller_stack_top = 0;
+    ObjUpvalue* saved_open_upvalues = nullptr;
     struct SavedFrame {
         int base_register;
         int return_register;
         int callee_stack_pos;
+        int caller_stack_top;
         int ip_offset; // offset into bytecode
     };
     std::vector<SavedFrame> saved_frames;
+    ObjFiber* parent = nullptr;
+    int resume_return_reg = 0;
+    int frame_base = 0;  // frame index where this fiber's frames start
     ObjFiber() { type = ObjType::Fiber; }
 };
 

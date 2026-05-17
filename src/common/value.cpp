@@ -109,10 +109,17 @@ void gc_trace_references(Obj* obj) {
         case ObjType::Fiber: {
             auto* fiber = static_cast<ObjFiber*>(obj);
             gc_mark_object(static_cast<Obj*>(fiber->entry));
+            if (fiber->parent) gc_mark_object(static_cast<Obj*>(fiber->parent));
             gc_mark_value(fiber->yielded_value);
             gc_mark_value(fiber->resume_value);
+            for (auto& v : fiber->initial_args) {
+                gc_mark_value(v);
+            }
             for (auto& v : fiber->saved_stack) {
                 gc_mark_value(v);
+            }
+            for (ObjUpvalue* uv = fiber->saved_open_upvalues; uv; uv = uv->next_upvalue) {
+                gc_mark_object(static_cast<Obj*>(uv));
             }
             break;
         }

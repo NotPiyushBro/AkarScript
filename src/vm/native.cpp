@@ -392,6 +392,10 @@ void register_builtins(VM& vm) {
         } else {
             fiber->entry = allocate_closure(argv[0].as_function());
         }
+        // Store extra args for the first resume
+        for (int i = 1; i < argc; i++) {
+            fiber->initial_args.push_back(argv[i]);
+        }
         return Value(static_cast<Obj*>(fiber));
     });
 
@@ -403,22 +407,22 @@ void register_builtins(VM& vm) {
     });
 
     // fiber_resume(fiber, value) - resumes a fiber with a value
-    // Simply calls the fiber's entry function as a regular function call
+    // Sets a deferred resume flag; the run loop handles the actual frame push
     vm.define_native("fiber_resume", [&vm](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_fiber()) return Value();
         auto* fiber = argv[0].as_fiber();
         bool has_resume_val = (argc >= 2);
         Value resume_val = has_resume_val ? argv[1] : Value();
+        int arg_count = has_resume_val ? 1 : 0;
         if (fiber->state == ObjFiber::State::Done) return Value();
-        if (fiber->state == ObjFiber::State::Created) {
-            fiber->state = ObjFiber::State::Running;
-            fiber->state = ObjFiber::State::Done;
-            VM temp_vm;
-            std::vector<Value> args;
-            if (has_resume_val) args.push_back(resume_val);
-            return temp_vm.call_function(fiber->entry, args);
-        }
-        return resume_val;
+        // Set deferred resume - the run loop will handle the actual call
+        vm.resume_pending_ = true;
+        vm.resume_fiber_ = fiber;
+        vm.resume_value_ = resume_val;
+        vm.resume_has_value_ = has_resume_val;
+        vm.resume_return_reg_ = 0; // will be set by the CALL handler
+        vm.resume_arg_count_ = arg_count;
+        return Value(); // placeholder, actual result comes from fiber
     });
 
     // fiber_status(fiber) - returns fiber state as string
