@@ -380,7 +380,7 @@ void CodeGenerator::compile_call(CallExpr* node, int reg) {
                 emit(op_byte(Opcode::MOVE), target, arg_regs[i], 0);
             }
         }
-        emit(op_byte(Opcode::CALL), callee, static_cast<uint8_t>(arg_regs.size()), 0);
+        emit(op_byte(Opcode::CALL), callee, static_cast<int>(arg_regs.size()), 0);
         if (callee != reg) {
             emit(op_byte(Opcode::MOVE), reg, callee, 0);
         }
@@ -689,7 +689,7 @@ void CodeGenerator::compile_return(ReturnStmt* node) {
                     }
                 }
                 close_captured();
-                emit(op_byte(Opcode::TAIL_CALL), callee, static_cast<uint8_t>(arg_regs.size()), 0);
+                emit(op_byte(Opcode::TAIL_CALL), callee, static_cast<int>(arg_regs.size()), 0);
                 return;
             }
         }
@@ -806,14 +806,19 @@ void CodeGenerator::compile_destructuring(DestructuringStmt* node) {
         emit_bx(op_byte(Opcode::LOAD_CONST), idx_reg, idx_const);
         int val_reg = alloc_register();
         emit(op_byte(Opcode::GET_INDEX), val_reg, init_reg, idx_reg);
-        free_register(); // idx_reg
+        free_register(); // val_reg (N+1)
+        free_register(); // idx_reg (N)
         // Declare as local or set as global
         if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
             uint16_t name_const = make_identifier_constant(node->names[i]);
             emit_bx(op_byte(Opcode::SET_GLOBAL), val_reg, name_const);
-            free_register(); // val_reg
         } else {
-            declare_local(node->names[i], val_reg);
+            // Re-allocate val_reg as a persistent local
+            int local_reg = alloc_register();
+            if (local_reg != val_reg) {
+                emit(op_byte(Opcode::MOVE), local_reg, val_reg, 0);
+            }
+            declare_local(node->names[i], local_reg);
         }
     }
     free_register(); // init_reg
@@ -1108,7 +1113,7 @@ void CodeGenerator::emit_wide(uint8_t op, int a, int b, int c) {
     bc.push_back(static_cast<uint8_t>(inst & 0xFF));
 }
 
-size_t CodeGenerator::emit_jump(uint8_t op, uint8_t a, int16_t offset) {
+size_t CodeGenerator::emit_jump(uint8_t op, int a, int16_t offset) {
     size_t byte_pos = current_scope_->function->bytecode.size();
     emit_bx(op, a, static_cast<uint16_t>(offset));
     return byte_pos;

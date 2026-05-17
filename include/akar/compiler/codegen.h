@@ -103,7 +103,7 @@ private:
     void emit(uint8_t op, int a, int b, int c);
     void emit_bx(uint8_t op, int a, uint16_t bx);
     void emit_wide(uint8_t op, int a, int b, int c);
-    size_t emit_jump(uint8_t op, uint8_t a, int16_t offset = 0);
+    size_t emit_jump(uint8_t op, int a, int16_t offset = 0);
     void patch_jump(size_t jump_byte_pos, int16_t offset);
     size_t current_offset() const;
     size_t add_constant(Value value);
