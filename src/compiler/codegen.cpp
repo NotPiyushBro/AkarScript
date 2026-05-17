@@ -644,6 +644,9 @@ void CodeGenerator::compile_for_in(ForInStmt* node) {
     continues.resize(old_continue_size);
 
     free_register(); // done_reg
+    free_register(); // var_reg
+    free_register(); // iter_obj
+    free_register(); // iter_reg
     end_scope();
 }
 
@@ -727,9 +730,8 @@ void CodeGenerator::compile_let(LetStmt* node) {
             emit_bx(op_byte(Opcode::SET_GLOBAL), init_reg, name_const);
             free_register(); // free the init_reg
         } else {
-            int reg = alloc_register();
-            emit(op_byte(Opcode::MOVE), reg, init_reg, 0);
-            declare_local(node->name, reg);
+            // init_reg is already allocated by compile_expr, use it directly as the local
+            declare_local(node->name, init_reg);
         }
     } else {
         int reg = alloc_register();
