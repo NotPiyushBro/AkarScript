@@ -58,6 +58,9 @@ void VM::mark_roots() {
     }
     // Mark yield value
     gc_mark_value(yield_value_);
+    // Mark resume value and skip_native_result (can hold object references during fiber ops)
+    gc_mark_value(resume_value_);
+    gc_mark_value(skip_native_result_);
     // Mark active fiber and pending resume fiber
     if (active_fiber_) {
         gc_mark_object(static_cast<Obj*>(active_fiber_));
