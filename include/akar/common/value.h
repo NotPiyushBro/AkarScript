@@ -30,6 +30,7 @@ struct Obj {
     ObjType type;
     bool marked = false;
     Obj* next = nullptr; // GC linked list
+    virtual ~Obj() = default;
 };
 
 // NaN-boxing: pack all Value types into 8 bytes using the IEEE 754 NaN space.
@@ -86,7 +87,7 @@ struct Value {
     bool is_nil() const { return bits == NIL_VAL; }
     bool is_bool() const { return bits == FALSE_VAL || bits == TRUE_VAL; }
     bool is_number() const { return (bits & NAN_BASE) != NAN_BASE; }
-    bool is_obj() const { return (bits & NAN_BASE) == NAN_BASE && !is_nil() && !is_bool(); }
+    bool is_obj() const { return (bits & NAN_BASE) == NAN_BASE && bits != NAN_BASE && !is_nil() && !is_bool(); }
     bool is_string() const;
     bool is_array() const;
     bool is_map() const;
