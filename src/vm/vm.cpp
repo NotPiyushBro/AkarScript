@@ -134,6 +134,7 @@ InterpretResult VM::run_bytecode(const std::vector<uint8_t>& bytecode, const std
 InterpretResult VM::run() {
     CallFrame* frame = &frames_[frame_count_ - 1];
     int base = frame->base_register;
+    int call_a = 0, call_b = 0; // shared between normal CALL and WIDE CALL
 
     // Helper: refresh frame and base after call/return
     #define REFRESH_FRAME() do { frame = &frames_[frame_count_ - 1]; base = frame->base_register; } while(0)
@@ -570,9 +571,14 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(CALL): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
+        call_a = frame->ip[1];
+        call_b = frame->ip[2];
         frame->ip += 4;
+    }
+    // Shared entry point for WIDE CALL (call_a/call_b already set, IP already advanced)
+    do_call: {
+        int a = call_a;
+        int b = call_b;
 
         if (skip_native_call_) {
             skip_native_call_ = false;
@@ -1402,6 +1408,7 @@ InterpretResult VM::run() {
         uint16_t wa = (wip[2] << 8) | wip[3];
         uint16_t wb = (wip[4] << 8) | wip[5];
         uint16_t wc = (wip[6] << 8) | wip[7];
+        VLOG("[WIDE] op=%d a=%d b=%d c=%d ip_offset=%d\n", wide_op, wa, wb, wc, (int)(wip - frame->closure->function->bytecode.data()));
         frame->ip += WIDE_INST_SIZE;
 
         switch (static_cast<Opcode>(wide_op)) {
@@ -1514,6 +1521,12 @@ InterpretResult VM::run() {
                 }
                 break;
             }
+            case Opcode::CALL: {
+                // Redirect to shared CALL handler
+                call_a = wa;
+                call_b = wb;
+                goto do_call;
+            }
             case Opcode::RETURN: {
                 Value result = S(wa);
                 // Close upvalues at this frame's base
@@ -1539,7 +1552,6 @@ InterpretResult VM::run() {
                 REFRESH_FRAME();
                 break;
             }
-            case Opcode::PRINT: std::cout << S(wa).to_string() << std::endl; break;
             default:
                 runtime_error("Opcode %d cannot be used with WIDE prefix", wide_op);
                 RETURN_RUNTIME_ERROR;

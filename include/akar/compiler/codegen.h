@@ -100,9 +100,9 @@ private:
     int add_upvalue(uint8_t index, bool is_local);
 
     // Emission helpers
-    void emit(uint8_t op, uint8_t a, uint8_t b, uint8_t c);
-    void emit_bx(uint8_t op, uint8_t a, uint16_t bx);
-    void emit_wide(uint8_t op, uint16_t a, uint16_t b, uint16_t c);
+    void emit(uint8_t op, int a, int b, int c);
+    void emit_bx(uint8_t op, int a, uint16_t bx);
+    void emit_wide(uint8_t op, int a, int b, int c);
     size_t emit_jump(uint8_t op, uint8_t a, int16_t offset = 0);
     void patch_jump(size_t jump_byte_pos, int16_t offset);
     size_t current_offset() const;

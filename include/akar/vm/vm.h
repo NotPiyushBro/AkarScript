@@ -92,6 +92,9 @@ private:
     bool call(ObjClosure* closure, int arg_count, int return_reg, int callee_abs);
     bool call_native(ObjNative* native, int arg_count, int return_reg, int callee_abs);
     void pop_frame();
+    // Shared CALL handler for normal and WIDE instructions
+    // Returns: 0 = continue, 1 = dispatch (yield/skip), -1 = error
+    int exec_call(int a, int b);
 
     // Error handling
     void runtime_error(const char* format, ...);

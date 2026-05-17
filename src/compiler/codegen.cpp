@@ -391,16 +391,28 @@ void CodeGenerator::compile_call(CallExpr* node, int reg) {
         for (auto& arg : node->arguments) {
             arg_regs.push_back(compile_expr(arg));
         }
-        // Move args to consecutive registers after callee (right-to-left to avoid clobbering)
+        // If callee is in a high register, move it to a low temp (CALL needs 8-bit register)
+        int call_callee = callee;
+        bool used_temp_callee = false;
+        if (callee > 255) {
+            call_callee = alloc_register(); // should get a low register since temps are freed
+            emit(op_byte(Opcode::MOVE), call_callee, callee, 0);
+            used_temp_callee = true;
+        }
+        // Move args to consecutive registers after call_callee (right-to-left to avoid clobbering)
         for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
-            int target = callee + 1 + i;
+            int target = call_callee + 1 + i;
             if (arg_regs[i] != target) {
                 emit(op_byte(Opcode::MOVE), target, arg_regs[i], 0);
             }
         }
-        emit(op_byte(Opcode::CALL), callee, static_cast<uint8_t>(arg_regs.size()), 0);
-        if (callee != reg) {
-            emit(op_byte(Opcode::MOVE), reg, callee, 0);
+        emit(op_byte(Opcode::CALL), call_callee, static_cast<uint8_t>(arg_regs.size()), 0);
+        // Move result from call_callee to target register if needed
+        if (call_callee != reg) {
+            emit(op_byte(Opcode::MOVE), reg, call_callee, 0);
+        }
+        if (used_temp_callee) {
+            free_register(); // free the temp callee register
         }
     }
 }
@@ -1054,7 +1066,7 @@ int CodeGenerator::add_upvalue(uint8_t index, bool is_local) {
 }
 
 // Emission helpers
-void CodeGenerator::emit(uint8_t op, uint8_t a, uint8_t b, uint8_t c) {
+void CodeGenerator::emit(uint8_t op, int a, int b, int c) {
     // Auto-emit wide if any register exceeds 8-bit range
     if (a > 255 || b > 255 || c > 255) {
         emit_wide(op, a, b, c);
@@ -1067,7 +1079,7 @@ void CodeGenerator::emit(uint8_t op, uint8_t a, uint8_t b, uint8_t c) {
     current_scope_->function->bytecode.push_back(static_cast<uint8_t>(inst & 0xFF));
 }
 
-void CodeGenerator::emit_bx(uint8_t op, uint8_t a, uint16_t bx) {
+void CodeGenerator::emit_bx(uint8_t op, int a, uint16_t bx) {
     // Auto-emit wide if A exceeds 8-bit range
     if (a > 255) {
         // For BX ops, pack BX into B:16 and C:16
@@ -1081,7 +1093,7 @@ void CodeGenerator::emit_bx(uint8_t op, uint8_t a, uint16_t bx) {
     current_scope_->function->bytecode.push_back(static_cast<uint8_t>(inst & 0xFF));
 }
 
-void CodeGenerator::emit_wide(uint8_t op, uint16_t a, uint16_t b, uint16_t c) {
+void CodeGenerator::emit_wide(uint8_t op, int a, int b, int c) {
     auto& bc = current_scope_->function->bytecode;
     // WIDE prefix
     bc.push_back(op_byte(Opcode::WIDE));
