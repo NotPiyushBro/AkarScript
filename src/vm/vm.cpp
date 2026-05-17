@@ -923,7 +923,7 @@ InterpretResult VM::run() {
             stack_top_ = std::max(saved_top, callee_pos + 1);
             stack_[callee_pos] = Value();
             REFRESH_FRAME();
-            break;
+            DISPATCH();
         }
         DISPATCH();
     }
