@@ -963,7 +963,7 @@ InterpretResult VM::run() {
         }
         TryFrame& tf = try_frames_[try_count_++];
         tf.frame_count = frame_count_;
-        tf.catch_ip = frame->ip + bx * 4;
+        tf.catch_ip = frame->ip + static_cast<int16_t>(bx);
         tf.catch_register = a;
         DISPATCH();
     }
@@ -972,7 +972,7 @@ InterpretResult VM::run() {
         frame->ip += 4;
         if (try_count_ > 0) try_count_--;
         if (bx > 0) {
-            frame->ip += bx * 4;
+            frame->ip += bx;
         }
         DISPATCH();
     }
@@ -1446,20 +1446,8 @@ InterpretResult VM::run() {
                 break;
             }
             case Opcode::SET_LOCAL: stack_[frame->base_register + wb] = S(wa); break;
-            case Opcode::GET_UPVALUE: {
-                auto* uv = frame->closure->upvalues[wb];
-                S(wa) = uv->closed.is_nil() ? *uv->location : uv->closed;
-                break;
-            }
-            case Opcode::SET_UPVALUE: {
-                auto* uv = frame->closure->upvalues[wb];
-                if (uv->location == &uv->closed || uv->closed.is_nil()) {
-                    *uv->location = S(wa);
-                } else {
-                    uv->closed = S(wa);
-                }
-                break;
-            }
+            case Opcode::GET_UPVALUE: S(wa) = *frame->closure->upvalues[wb]->location; break;
+            case Opcode::SET_UPVALUE: *frame->closure->upvalues[wb]->location = S(wa); break;
             case Opcode::ADD: {
                 Value& rb = S(wb); Value& rc = S(wc);
                 if (rb.is_number() && rc.is_number()) {
@@ -1556,33 +1544,28 @@ InterpretResult VM::run() {
             }
             case Opcode::RETURN: {
                 Value result = S(wa);
-                // Close upvalues at this frame's base
-                {
-                    Value* slot_ptr = &stack_[frame->base_register];
-                    while (open_upvalues_ && open_upvalues_->location >= slot_ptr) {
-                        ObjUpvalue* uv = open_upvalues_;
-                        uv->closed = *uv->location;
-                        uv->location = &uv->closed;
-                        open_upvalues_ = uv->next_upvalue;
-                    }
-                }
                 int callee_pos = frame->callee_stack_pos;
-                int caller_top = frame->caller_stack_top;
+                int saved_top = frame->caller_stack_top;
+                frame_count_--;
+                if (frame_count_ == 0) {
+                    stack_top_ = 0;
+                    stack_[stack_top_++] = result;
+                    return InterpretResult::Ok;
+                }
                 if (active_fiber_ && frame_count_ == active_fiber_->frame_base) {
                     active_fiber_->state = ObjFiber::State::Done;
                     active_fiber_ = active_fiber_->parent;
                 }
-                frame_count_--;
-                if (frame_count_ == 0) { stack_[0] = result; stack_top_ = 1; return InterpretResult::Ok; }
-                stack_top_ = std::max(caller_top, callee_pos + 1);
+                stack_top_ = std::max(saved_top, callee_pos + 1);
                 stack_[callee_pos] = result;
                 REFRESH_FRAME();
                 break;
             }
             case Opcode::JMP: {
                 int16_t offset = static_cast<int16_t>((wb << 8) | wc);
-                // WIDE handler already advanced ip by WIDE_INST_SIZE, undo it
-                frame->ip = wip + offset;
+                // patch_jump subtracts 4 for WIDE, but JMP callers don't subtract INST_SIZE
+                // so we need to add INST_SIZE back to compensate
+                frame->ip = wip + INST_SIZE + offset;
                 break;
             }
             case Opcode::JMP_IF_FALSE: {
@@ -1599,6 +1582,517 @@ InterpretResult VM::run() {
                 }
                 break;
             }
+            case Opcode::NEW_ARRAY: {
+                auto* arr = allocate_array();
+                S(wa) = Value(static_cast<Obj*>(arr));
+                break;
+            }
+            case Opcode::NEW_MAP: {
+                auto* map = allocate_map();
+                S(wa) = Value(static_cast<Obj*>(map));
+                break;
+            }
+            case Opcode::GET_INDEX: {
+                Value obj = S(wb);
+                Value idx = S(wc);
+                if (obj.is_array()) {
+                    if (!idx.is_number()) { runtime_error("Array index must be a number"); RETURN_RUNTIME_ERROR; }
+                    auto& elems = obj.as_array()->elements;
+                    int i = static_cast<int>(idx.get_number());
+                    if (i < 0) i += (int)elems.size();
+                    if (i < 0 || i >= (int)elems.size()) { runtime_error("Array index out of bounds"); RETURN_RUNTIME_ERROR; }
+                    S(wa) = elems[i];
+                } else if (obj.is_map()) {
+                    if (!idx.is_string()) { runtime_error("Map key must be a string"); RETURN_RUNTIME_ERROR; }
+                    auto& entries = obj.as_map()->entries;
+                    auto it = entries.find(idx.as_string()->value);
+                    S(wa) = (it == entries.end()) ? Value() : it->second;
+                } else if (obj.is_string()) {
+                    if (!idx.is_number()) { runtime_error("String index must be a number"); RETURN_RUNTIME_ERROR; }
+                    auto& s = obj.as_string()->value;
+                    int i = static_cast<int>(idx.get_number());
+                    if (i < 0) i += (int)s.size();
+                    if (i < 0 || i >= (int)s.size()) { runtime_error("String index out of bounds"); RETURN_RUNTIME_ERROR; }
+                    auto* ch = get_string_table().intern(std::string(1, s[i]));
+                    S(wa) = Value(static_cast<Obj*>(ch));
+                } else {
+                    runtime_error("Cannot index this value");
+                    RETURN_RUNTIME_ERROR;
+                }
+                break;
+            }
+            case Opcode::SET_INDEX: {
+                Value obj = S(wa);
+                Value idx = S(wb);
+                Value val = S(wc);
+                if (obj.is_array()) {
+                    if (!idx.is_number()) { runtime_error("Array index must be a number"); RETURN_RUNTIME_ERROR; }
+                    auto& elems = obj.as_array()->elements;
+                    int i = static_cast<int>(idx.get_number());
+                    if (i < 0) { runtime_error("Array index out of bounds"); RETURN_RUNTIME_ERROR; }
+                    if (i >= (int)elems.size()) elems.resize(i + 1);
+                    elems[i] = val;
+                } else if (obj.is_map()) {
+                    if (!idx.is_string()) { runtime_error("Map key must be a string"); RETURN_RUNTIME_ERROR; }
+                    obj.as_map()->entries[idx.as_string()->value] = val;
+                } else {
+                    runtime_error("Cannot index this value");
+                    RETURN_RUNTIME_ERROR;
+                }
+                break;
+            }
+            case Opcode::GET_FIELD: {
+                Value obj = S(wb);
+                auto& constants = frame->closure->function->constants;
+                if (wc >= constants.size() || !constants[wc].is_string()) {
+                    runtime_error("Invalid field name");
+                    RETURN_RUNTIME_ERROR;
+                }
+                std::string field = constants[wc].as_string()->value;
+                if (obj.is_instance()) {
+                    auto& fields = obj.as_instance()->fields;
+                    auto it = fields.find(field);
+                    if (it != fields.end()) {
+                        S(wa) = it->second;
+                    } else {
+                        auto& methods = obj.as_instance()->klass->methods;
+                        auto meth_it = methods.find(field);
+                        S(wa) = (meth_it != methods.end()) ? meth_it->second : Value();
+                    }
+                } else if (obj.is_map()) {
+                    auto it = obj.as_map()->entries.find(field);
+                    S(wa) = (it != obj.as_map()->entries.end()) ? it->second : Value();
+                } else if (obj.is_string()) {
+                    if (field == "length" || field == akar_hash_symbol("length")) {
+                        S(wa) = Value(static_cast<double>(obj.as_string()->value.size()));
+                    } else {
+                        S(wa) = Value();
+                    }
+                } else if (obj.is_array()) {
+                    if (field == "length" || field == akar_hash_symbol("length")) {
+                        S(wa) = Value(static_cast<double>(obj.as_array()->elements.size()));
+                    } else {
+                        S(wa) = Value();
+                    }
+                } else {
+                    S(wa) = Value();
+                }
+                break;
+            }
+            case Opcode::SET_FIELD: {
+                Value obj = S(wa);
+                auto& constants = frame->closure->function->constants;
+                if (wb >= constants.size() || !constants[wb].is_string()) {
+                    runtime_error("Invalid field name");
+                    RETURN_RUNTIME_ERROR;
+                }
+                std::string field = constants[wb].as_string()->value;
+                if (obj.is_instance()) {
+                    obj.as_instance()->fields[field] = S(wc);
+                } else if (obj.is_class()) {
+                    obj.as_class()->methods[field] = S(wc);
+                } else if (obj.is_map()) {
+                    obj.as_map()->entries[field] = S(wc);
+                } else {
+                    runtime_error("Cannot set field on this value");
+                    RETURN_RUNTIME_ERROR;
+                }
+                break;
+            }
+            case Opcode::NEW_CLASS: {
+                uint16_t bx = (wb << 8) | wc;
+                auto& constants = frame->closure->function->constants;
+                if (bx >= constants.size() || !constants[bx].is_string()) {
+                    runtime_error("Invalid class name");
+                    RETURN_RUNTIME_ERROR;
+                }
+                auto* cls = allocate_class(constants[bx].as_string()->value);
+                S(wa) = Value(static_cast<Obj*>(cls));
+                break;
+            }
+            case Opcode::NEW_INSTANCE: {
+                if (!S(wb).is_class()) {
+                    runtime_error("Cannot instantiate non-class");
+                    RETURN_RUNTIME_ERROR;
+                }
+                auto* inst = allocate_instance(S(wb).as_class());
+                S(wa) = Value(static_cast<Obj*>(inst));
+                break;
+            }
+            case Opcode::GET_METHOD: {
+                auto& constants = frame->closure->function->constants;
+                if (wc >= constants.size() || !constants[wc].is_string()) {
+                    S(wa) = Value();
+                    break;
+                }
+                std::string method = constants[wc].as_string()->value;
+                Value obj = S(wb);
+                if (obj.is_instance()) {
+                    auto& methods = obj.as_instance()->klass->methods;
+                    auto it = methods.find(method);
+                    S(wa) = (it != methods.end()) ? it->second : Value();
+                } else {
+                    S(wa) = Value();
+                }
+                break;
+            }
+            case Opcode::NEW_RANGE: {
+                if (!S(wb).is_number() || !S(wc).is_number()) {
+                    runtime_error("Range bounds must be numbers");
+                    RETURN_RUNTIME_ERROR;
+                }
+                auto* map = allocate_map();
+                map->entries["start"] = S(wb);
+                map->entries["end"] = S(wc);
+                map->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("range")));
+                S(wa) = Value(static_cast<Obj*>(map));
+                break;
+            }
+            case Opcode::ITER_INIT: {
+                Value iterable = S(wb);
+                auto* iter = allocate_map();
+                if (iterable.is_array()) {
+                    iter->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("array_iter")));
+                    iter->entries["__data__"] = iterable;
+                    iter->entries["__index__"] = Value(0.0);
+                    iter->entries["__done__"] = Value(false);
+                } else if (iterable.is_map() && iterable.as_map()->entries.count("__type__") &&
+                           iterable.as_map()->entries["__type__"].is_string() &&
+                           iterable.as_map()->entries["__type__"].as_string()->value == "range") {
+                    double start_val = iterable.as_map()->entries["start"].get_number();
+                    double end_val = iterable.as_map()->entries["end"].get_number();
+                    iter->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("range_iter")));
+                    iter->entries["__current__"] = Value(start_val);
+                    iter->entries["__end__"] = Value(end_val);
+                    iter->entries["__step__"] = Value(start_val <= end_val ? 1.0 : -1.0);
+                    iter->entries["__done__"] = Value(false);
+                } else if (iterable.is_string()) {
+                    iter->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("string_iter")));
+                    iter->entries["__data__"] = iterable;
+                    iter->entries["__index__"] = Value(0.0);
+                    iter->entries["__done__"] = Value(false);
+                } else {
+                    runtime_error("Cannot iterate this value");
+                    RETURN_RUNTIME_ERROR;
+                }
+                S(wa) = Value(static_cast<Obj*>(iter));
+                break;
+            }
+            case Opcode::ITER_NEXT: {
+                Value iter_val = S(wb);
+                if (!iter_val.is_map()) {
+                    runtime_error("Invalid iterator");
+                    RETURN_RUNTIME_ERROR;
+                }
+                auto* iter = iter_val.as_map();
+                std::string type = iter->entries["__type__"].as_string()->value;
+                if (type == "array_iter") {
+                    int idx = static_cast<int>(iter->entries["__index__"].get_number());
+                    auto* arr = iter->entries["__data__"].as_array();
+                    if (idx < (int)arr->elements.size()) {
+                        S(wa) = arr->elements[idx];
+                        iter->entries["__index__"] = Value(static_cast<double>(idx + 1));
+                    } else {
+                        iter->entries["__done__"] = Value(true);
+                        S(wa) = Value();
+                    }
+                } else if (type == "range_iter") {
+                    double current = iter->entries["__current__"].get_number();
+                    double end = iter->entries["__end__"].get_number();
+                    double step = iter->entries["__step__"].get_number();
+                    bool done = (step > 0) ? (current > end) : (current < end);
+                    if (!done) {
+                        S(wa) = Value(current);
+                        iter->entries["__current__"] = Value(current + step);
+                    } else {
+                        iter->entries["__done__"] = Value(true);
+                        S(wa) = Value();
+                    }
+                } else if (type == "string_iter") {
+                    int idx = static_cast<int>(iter->entries["__index__"].get_number());
+                    auto& s = iter->entries["__data__"].as_string()->value;
+                    if (idx < (int)s.size()) {
+                        auto* ch = get_string_table().intern(std::string(1, s[idx]));
+                        S(wa) = Value(static_cast<Obj*>(ch));
+                        iter->entries["__index__"] = Value(static_cast<double>(idx + 1));
+                    } else {
+                        iter->entries["__done__"] = Value(true);
+                        S(wa) = Value();
+                    }
+                }
+                break;
+            }
+            case Opcode::ITER_DONE: {
+                Value iter = S(wb);
+                if (iter.is_map() && iter.as_map()->entries.count("__done__")) {
+                    S(wa) = iter.as_map()->entries["__done__"];
+                } else {
+                    S(wa) = Value(true);
+                }
+                break;
+            }
+            case Opcode::PRINT: {
+                std::cout << S(wa).to_string() << std::endl;
+                break;
+            }
+            case Opcode::FIBER_YIELD: {
+                if (skip_native_call_) {
+                    skip_native_call_ = false;
+                    S(wa) = skip_native_result_;
+                    break;
+                }
+                yield_pending_ = true;
+                yield_value_ = S(wa);
+                break;
+            }
+            case Opcode::FIBER_RESUME: {
+                Value fiber_val = S(wb);
+                Value resume_val = S(wc);
+                if (!fiber_val.is_fiber()) {
+                    runtime_error("Can only resume a fiber");
+                    RETURN_RUNTIME_ERROR;
+                }
+                auto* fiber = fiber_val.as_fiber();
+                if (fiber->state == ObjFiber::State::Done) {
+                    runtime_error("Cannot resume a finished fiber");
+                    RETURN_RUNTIME_ERROR;
+                }
+                if (fiber->state == ObjFiber::State::Suspended) {
+                    int caller_base = frame->base_register;
+                    stack_top_ = caller_base;
+                    for (size_t i = 0; i < fiber->saved_stack.size(); i++) {
+                        stack_[stack_top_++] = fiber->saved_stack[i];
+                    }
+                    int new_frame_base = frame_count_;
+                    frame_count_ = new_frame_base + fiber->saved_frame_count;
+                    for (int i = 0; i < fiber->saved_frame_count; i++) {
+                        auto& sf = fiber->saved_frames[i];
+                        auto& f = frames_[new_frame_base + i];
+                        f.base_register = sf.base_register;
+                        f.return_register = sf.return_register;
+                        f.callee_stack_pos = sf.callee_stack_pos;
+                        f.caller_stack_top = sf.caller_stack_top;
+                        int closure_idx = sf.callee_stack_pos - caller_base;
+                        if (closure_idx >= 0 && closure_idx < (int)fiber->saved_stack.size() && fiber->saved_stack[closure_idx].is_closure()) {
+                            f.closure = fiber->saved_stack[closure_idx].as_closure();
+                            f.ip = f.closure->function->bytecode.data() + sf.ip_offset;
+                        }
+                    }
+                    fiber->frame_base = new_frame_base;
+                    open_upvalues_ = fiber->saved_open_upvalues;
+                    fiber->state = ObjFiber::State::Running;
+                    fiber->parent = active_fiber_;
+                    fiber->resume_return_reg = wa;
+                    active_fiber_ = fiber;
+                    skip_native_call_ = true;
+                    skip_native_result_ = resume_val;
+                    REFRESH_FRAME();
+                    break;
+                }
+                // Created state: start the fiber
+                fiber->state = ObjFiber::State::Running;
+                fiber->parent = active_fiber_;
+                fiber->resume_return_reg = wa;
+                active_fiber_ = fiber;
+                int callee_abs = stack_top_;
+                stack_[stack_top_++] = Value(static_cast<Obj*>(fiber->entry));
+                int arg_count = 0;
+                if (!resume_val.is_nil()) {
+                    stack_[stack_top_++] = resume_val;
+                    arg_count = 1;
+                } else {
+                    arg_count = (int)fiber->initial_args.size();
+                    for (int i = 0; i < arg_count; i++) {
+                        stack_[stack_top_++] = fiber->initial_args[i];
+                    }
+                }
+                fiber->frame_base = frame_count_;
+                if (!call(fiber->entry, arg_count, wa, callee_abs)) {
+                    active_fiber_ = nullptr;
+                    RETURN_RUNTIME_ERROR;
+                }
+                REFRESH_FRAME();
+                break;
+            }
+            case Opcode::TAIL_CALL: {
+                int arg_count = wb;
+                int callee_abs = frame->base_register + wa;
+                Value callee = stack_[callee_abs];
+                if (callee.is_closure()) {
+                    auto* closure = callee.as_closure();
+                    if (arg_count != closure->function->arity) {
+                        runtime_error("Expected %d arguments but got %d", closure->function->arity, arg_count);
+                        RETURN_RUNTIME_ERROR;
+                    }
+                    while (open_upvalues_ && open_upvalues_->location >= &stack_[frame->base_register]) {
+                        ObjUpvalue* uv = open_upvalues_;
+                        uv->closed = *uv->location;
+                        uv->location = &uv->closed;
+                        open_upvalues_ = uv->next_upvalue;
+                    }
+                    int args_src = callee_abs + 1;
+                    for (int i = 0; i < arg_count; i++) {
+                        stack_[frame->base_register + i] = stack_[args_src + i];
+                    }
+                    int needed = closure->function->register_count;
+                    for (int i = arg_count; i < needed; i++) {
+                        stack_[frame->base_register + i] = Value();
+                    }
+                    frame->closure = closure;
+                    frame->ip = closure->function->bytecode.data();
+                    stack_top_ = frame->base_register + needed;
+                } else if (callee.is_native()) {
+                    auto* native = callee.as_native();
+                    Value* args = &stack_[callee_abs + 1];
+                    Value result = native->function(arg_count, args);
+                    int callee_pos = frame->callee_stack_pos;
+                    frame_count_--;
+                    if (frame_count_ == 0) {
+                        stack_top_ = 0;
+                        stack_[stack_top_++] = result;
+                        return InterpretResult::Ok;
+                    }
+                    stack_top_ = callee_pos;
+                    stack_[stack_top_++] = result;
+                    REFRESH_FRAME();
+                } else if (callee.is_class()) {
+                    auto* instance = allocate_instance(callee.as_class());
+                    Value instance_val = Value(static_cast<Obj*>(instance));
+                    stack_[callee_abs] = instance_val;
+                    auto& methods = callee.as_class()->methods;
+                    auto init_it = methods.find("init");
+                    if (init_it == methods.end()) init_it = methods.find(akar_hash_symbol("init"));
+                    if (init_it != methods.end() && init_it->second.is_closure()) {
+                        for (int i = arg_count; i > 0; i--) {
+                            stack_[callee_abs + 1 + i] = stack_[callee_abs + 1 + i - 1];
+                        }
+                        stack_[callee_abs + 1] = instance_val;
+                        stack_top_ += 1;
+                        auto* init_closure = init_it->second.as_closure();
+                        while (open_upvalues_ && open_upvalues_->location >= &stack_[frame->base_register]) {
+                            ObjUpvalue* uv = open_upvalues_;
+                            uv->closed = *uv->location;
+                            uv->location = &uv->closed;
+                            open_upvalues_ = uv->next_upvalue;
+                        }
+                        int args_src = callee_abs + 1;
+                        int total_args = arg_count + 1;
+                        for (int i = 0; i < total_args; i++) {
+                            stack_[frame->base_register + i] = stack_[args_src + i];
+                        }
+                        int needed = init_closure->function->register_count;
+                        for (int i = total_args; i < needed; i++) {
+                            stack_[frame->base_register + i] = Value();
+                        }
+                        frame->closure = init_closure;
+                        frame->ip = init_closure->function->bytecode.data();
+                        stack_top_ = frame->base_register + needed;
+                    }
+                } else {
+                    runtime_error("Tail call target must be a function or class");
+                    RETURN_RUNTIME_ERROR;
+                }
+                break;
+            }
+            case Opcode::AWAIT: {
+                Value val = S(wa);
+                if (val.is_nil()) {
+                    int callee_pos = frame->callee_stack_pos;
+                    int saved_top = frame->caller_stack_top;
+                    frame_count_--;
+                    if (frame_count_ == 0) {
+                        stack_top_ = 0;
+                        stack_[stack_top_++] = Value();
+                        return InterpretResult::Ok;
+                    }
+                    stack_top_ = std::max(saved_top, callee_pos + 1);
+                    stack_[callee_pos] = Value();
+                    REFRESH_FRAME();
+                    break;
+                }
+                break;
+            }
+            case Opcode::THROW: {
+                Value exception = S(wa);
+                std::string msg;
+                if (exception.is_string()) msg = exception.as_string()->value;
+                else if (exception.is_number()) msg = std::to_string(exception.get_number());
+                else msg = "thrown exception";
+                if (try_count_ > 0) {
+                    TryFrame& tf = try_frames_[--try_count_];
+                    while (frame_count_ > tf.frame_count) {
+                        frame_count_--;
+                    }
+                    REFRESH_FRAME();
+                    frame->ip = tf.catch_ip;
+                    if (exception.is_string()) {
+                        S(tf.catch_register) = exception;
+                    } else {
+                        auto* err_str = get_string_table().intern(msg);
+                        S(tf.catch_register) = Value(static_cast<Obj*>(err_str));
+                    }
+                    DISPATCH();
+                }
+                runtime_error("%s", msg.c_str());
+                RETURN_RUNTIME_ERROR;
+            }
+            case Opcode::TRY_BEGIN: {
+                uint16_t bx = (wb << 8) | wc;
+                if (try_count_ >= MAX_TRY) {
+                    runtime_error("Too many nested try blocks");
+                    RETURN_RUNTIME_ERROR;
+                }
+                TryFrame& tf = try_frames_[try_count_++];
+                tf.frame_count = frame_count_;
+                tf.catch_ip = frame->ip + static_cast<int16_t>(bx);
+                tf.catch_register = wa;
+                break;
+            }
+            case Opcode::TRY_END: {
+                uint16_t bx = (wb << 8) | wc;
+                if (try_count_ > 0) try_count_--;
+                if (bx > 0) {
+                    frame->ip += bx;
+                }
+                break;
+            }
+            case Opcode::CLOSURE: {
+                uint16_t bx = (wb << 8) | wc;
+                auto& constants = frame->closure->function->constants;
+                if (bx >= constants.size() || !constants[bx].is_obj() ||
+                    constants[bx].as_obj()->type != ObjType::Function) {
+                    runtime_error("Invalid closure constant");
+                    RETURN_RUNTIME_ERROR;
+                }
+                auto* func = static_cast<ObjFunction*>(constants[bx].as_obj());
+                auto* closure = allocate_closure(func);
+                for (auto& desc : func->upvalue_descs) {
+                    ObjUpvalue* upvalue = nullptr;
+                    if (desc.is_local) {
+                        Value* local_slot = &stack_[frame->base_register + desc.index];
+                        ObjUpvalue** pp = &open_upvalues_;
+                        while (*pp && (*pp)->location > local_slot) {
+                            pp = &(*pp)->next_upvalue;
+                        }
+                        if (*pp && (*pp)->location == local_slot) {
+                            upvalue = *pp;
+                        } else {
+                            upvalue = allocate_upvalue(local_slot);
+                            upvalue->next_upvalue = *pp;
+                            *pp = upvalue;
+                        }
+                    } else {
+                        upvalue = frame->closure->upvalues[desc.index];
+                    }
+                    closure->upvalues.push_back(upvalue);
+                }
+                S(wa) = Value(static_cast<Obj*>(closure));
+                break;
+            }
+            case Opcode::HALT:
+                return InterpretResult::Ok;
+            case Opcode::NOP:
+                break;
             default:
                 runtime_error("Opcode %d cannot be used with WIDE prefix", wide_op);
                 RETURN_RUNTIME_ERROR;

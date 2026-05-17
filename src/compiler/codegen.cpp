@@ -365,7 +365,7 @@ void CodeGenerator::compile_call(CallExpr* node, int reg) {
         uint16_t method_const = make_identifier_constant(field->field);
         // Allocate callee register
         int callee = alloc_register();
-        emit(op_byte(Opcode::GET_FIELD), callee, object_reg, static_cast<uint8_t>(method_const));
+        emit(op_byte(Opcode::GET_FIELD), callee, object_reg, method_const);
 
         // Compile args
         std::vector<int> arg_regs;
@@ -426,14 +426,14 @@ void CodeGenerator::compile_index(IndexExpr* node, int reg) {
 void CodeGenerator::compile_field_access(FieldAccessExpr* node, int reg) {
     int obj = compile_expr(node->object);
     uint16_t field_const = make_identifier_constant(node->field);
-    emit(op_byte(Opcode::GET_FIELD), reg, obj, static_cast<uint8_t>(field_const));
+    emit(op_byte(Opcode::GET_FIELD), reg, obj, field_const);
 }
 
 void CodeGenerator::compile_field_set(FieldSetExpr* node, int reg) {
     int obj = compile_expr(node->object);
     int val = compile_expr(node->value);
     uint16_t field_const = make_identifier_constant(node->field);
-    emit(op_byte(Opcode::SET_FIELD), obj, static_cast<uint8_t>(field_const), val);
+    emit(op_byte(Opcode::SET_FIELD), obj, field_const, val);
     emit(op_byte(Opcode::MOVE), reg, val, 0);
 }
 
@@ -779,7 +779,7 @@ void CodeGenerator::compile_class(ClassStmt* node) {
         int method_reg = alloc_register();
         emit_bx(op_byte(Opcode::CLOSURE), method_reg, func_const);
         uint16_t method_const = make_identifier_constant(method->name);
-        emit(op_byte(Opcode::SET_FIELD), class_reg, static_cast<uint8_t>(method_const), method_reg);
+        emit(op_byte(Opcode::SET_FIELD), class_reg, method_const, method_reg);
         free_register();
     }
 
