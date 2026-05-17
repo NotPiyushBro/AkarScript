@@ -269,7 +269,9 @@ InterpretResult VM::run() {
         uint8_t a = frame->ip[1];
         uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
         frame->ip += 4;
-        S(a) = frame->closure->function->constants[bx];
+        auto& constants = frame->closure->function->constants;
+        if (bx >= constants.size()) { runtime_error("Invalid constant index"); RETURN_RUNTIME_ERROR; }
+        S(a) = constants[bx];
         DISPATCH();
     }
     CASE(LOAD_NIL): {
@@ -315,6 +317,7 @@ InterpretResult VM::run() {
         uint8_t a = frame->ip[1];
         uint8_t b = frame->ip[2];
         frame->ip += 4;
+        if (b >= frame->closure->upvalues.size()) { runtime_error("Invalid upvalue index"); RETURN_RUNTIME_ERROR; }
         S(a) = *frame->closure->upvalues[b]->location;
         DISPATCH();
     }
@@ -322,6 +325,7 @@ InterpretResult VM::run() {
         uint8_t a = frame->ip[1];
         uint8_t b = frame->ip[2];
         frame->ip += 4;
+        if (b >= frame->closure->upvalues.size()) { runtime_error("Invalid upvalue index"); RETURN_RUNTIME_ERROR; }
         *frame->closure->upvalues[b]->location = S(a);
         DISPATCH();
     }
@@ -1246,7 +1250,12 @@ InterpretResult VM::run() {
             RETURN_RUNTIME_ERROR;
         }
         auto* iter = iter_val.as_map();
-        std::string type = iter->entries["__type__"].as_string()->value;
+        auto type_it = iter->entries.find("__type__");
+        if (type_it == iter->entries.end() || !type_it->second.is_string()) {
+            runtime_error("Invalid iterator: missing __type__");
+            RETURN_RUNTIME_ERROR;
+        }
+        std::string type = type_it->second.as_string()->value;
         if (type == "array_iter") {
             int idx = static_cast<int>(iter->entries["__index__"].get_number());
             auto* arr = iter->entries["__data__"].as_array();
@@ -1412,7 +1421,13 @@ InterpretResult VM::run() {
         frame->ip += WIDE_INST_SIZE;
 
         switch (static_cast<Opcode>(wide_op)) {
-            case Opcode::LOAD_CONST: S(wa) = frame->closure->function->constants[(wb << 8) | wc]; break;
+            case Opcode::LOAD_CONST: {
+                auto& constants = frame->closure->function->constants;
+                uint16_t idx = (wb << 8) | wc;
+                if (idx >= constants.size()) { runtime_error("Invalid constant index"); RETURN_RUNTIME_ERROR; }
+                S(wa) = constants[idx];
+                break;
+            }
             case Opcode::LOAD_NIL: S(wa) = Value(); break;
             case Opcode::LOAD_TRUE: S(wa) = Value(true); break;
             case Opcode::LOAD_FALSE: S(wa) = Value(false); break;
@@ -1446,8 +1461,16 @@ InterpretResult VM::run() {
                 break;
             }
             case Opcode::SET_LOCAL: stack_[frame->base_register + wb] = S(wa); break;
-            case Opcode::GET_UPVALUE: S(wa) = *frame->closure->upvalues[wb]->location; break;
-            case Opcode::SET_UPVALUE: *frame->closure->upvalues[wb]->location = S(wa); break;
+            case Opcode::GET_UPVALUE: {
+                if (wb >= frame->closure->upvalues.size()) { runtime_error("Invalid upvalue index"); RETURN_RUNTIME_ERROR; }
+                S(wa) = *frame->closure->upvalues[wb]->location;
+                break;
+            }
+            case Opcode::SET_UPVALUE: {
+                if (wb >= frame->closure->upvalues.size()) { runtime_error("Invalid upvalue index"); RETURN_RUNTIME_ERROR; }
+                *frame->closure->upvalues[wb]->location = S(wa);
+                break;
+            }
             case Opcode::ADD: {
                 Value& rb = S(wb); Value& rc = S(wc);
                 if (rb.is_number() && rc.is_number()) {
@@ -1785,7 +1808,12 @@ InterpretResult VM::run() {
                     RETURN_RUNTIME_ERROR;
                 }
                 auto* iter = iter_val.as_map();
-                std::string type = iter->entries["__type__"].as_string()->value;
+                auto type_it = iter->entries.find("__type__");
+                if (type_it == iter->entries.end() || !type_it->second.is_string()) {
+                    runtime_error("Invalid iterator: missing __type__");
+                    RETURN_RUNTIME_ERROR;
+                }
+                std::string type = type_it->second.as_string()->value;
                 if (type == "array_iter") {
                     int idx = static_cast<int>(iter->entries["__index__"].get_number());
                     auto* arr = iter->entries["__data__"].as_array();
@@ -2201,6 +2229,7 @@ bool VM::call(ObjClosure* closure, int arg_count, int return_reg, int callee_abs
         stack_[args_abs + i] = Value();
     }
     int new_top = args_abs + needed;
+    if (new_top > MAX_STACK) { runtime_error("Stack overflow"); return false; }
     if (new_top > stack_top_) stack_top_ = new_top;
 
     return true;
