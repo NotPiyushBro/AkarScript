@@ -20,7 +20,7 @@ namespace akar {
 //   5. ENTRY: entry point function index
 
 constexpr uint32_t AKAR_MAGIC = 0x414B4152; // "AKAR"
-constexpr uint16_t AKAR_VERSION = 1;
+constexpr uint16_t AKAR_VERSION = 2;  // v2: 16-bit register encoding (WIDE prefix)
 
 // Flag bits
 constexpr uint16_t AKAR_FLAG_DEBUG_SYMBOLS = 0x0001;

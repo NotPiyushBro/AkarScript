@@ -4,7 +4,8 @@
 namespace akar {
 
 // Register-based bytecode opcodes
-// Format: [opcode:8] [A:8] [B:8] [C:8]
+// Normal format: [opcode:8] [A:8] [B:8] [C:8] = 4 bytes
+// Wide format:   [WIDE:8] [opcode:8] [A:16] [B:16] [C:16] = 8 bytes
 // For some ops, B and C are combined as a 16-bit operand (BX)
 enum class Opcode : uint8_t {
     // Load/store
@@ -94,6 +95,9 @@ enum class Opcode : uint8_t {
     THROW,          // throw R[A] as exception
     TRY_BEGIN,      // mark start of try block, BX = catch offset
     TRY_END,        // mark end of try block
+
+    // Wide prefix - next instruction uses 16-bit register fields
+    WIDE,           // prefix: next instruction is [op:8][A:16][B:16][C:16] = 7 bytes
 };
 
 inline uint8_t op_byte(Opcode op) { return static_cast<uint8_t>(op); }
@@ -114,5 +118,22 @@ inline uint8_t get_b(uint32_t inst) { return (inst >> 8) & 0xFF; }
 inline uint8_t get_c(uint32_t inst) { return inst & 0xFF; }
 inline uint16_t get_bx(uint32_t inst) { return inst & 0xFFFF; }
 inline int16_t get_signed_bx(uint32_t inst) { return static_cast<int16_t>(inst & 0xFFFF); }
+
+// Instruction sizes
+static constexpr int INST_SIZE = 4;
+static constexpr int WIDE_INST_SIZE = 8; // 1 WIDE prefix + 7 wide instruction
+
+// Wide instruction encoding: [op:8][A:16][B:16][C:16] = 7 bytes
+// Stored in a uint64_t (low 56 bits)
+inline uint64_t make_wide_instruction(Opcode op, uint16_t a, uint16_t b, uint16_t c) {
+    return (static_cast<uint64_t>(op_byte(op)) << 48) |
+           (static_cast<uint64_t>(a) << 32) |
+           (static_cast<uint64_t>(b) << 16) |
+           static_cast<uint64_t>(c);
+}
+inline uint8_t get_wide_op(uint64_t inst) { return (inst >> 48) & 0xFF; }
+inline uint16_t get_wide_a(uint64_t inst) { return (inst >> 32) & 0xFFFF; }
+inline uint16_t get_wide_b(uint64_t inst) { return (inst >> 16) & 0xFFFF; }
+inline uint16_t get_wide_c(uint64_t inst) { return inst & 0xFFFF; }
 
 } // namespace akar

@@ -227,6 +227,7 @@ InterpretResult VM::run() {
         "PRINT", "HALT", "NOP",
         "FIBER_YIELD", "FIBER_RESUME", "TAIL_CALL",
         "AWAIT", "THROW", "TRY_BEGIN", "TRY_END",
+        "WIDE",
     };
 
 #ifdef __GNUC__
@@ -246,6 +247,7 @@ InterpretResult VM::run() {
         &&op_PRINT, &&op_HALT, &&op_NOP,
         &&op_FIBER_YIELD, &&op_FIBER_RESUME, &&op_TAIL_CALL,
         &&op_AWAIT, &&op_THROW, &&op_TRY_BEGIN, &&op_TRY_END,
+        &&op_WIDE,
     };
 
     #define DISPATCH() do { \
@@ -544,7 +546,7 @@ InterpretResult VM::run() {
     CASE(JMP): {
         uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
         int16_t offset = static_cast<int16_t>(bx);
-        frame->ip += offset * 4;
+        frame->ip += offset;
         DISPATCH();
     }
     CASE(JMP_IF_FALSE): {
@@ -553,7 +555,7 @@ InterpretResult VM::run() {
         frame->ip += 4;
         if (!S(a).is_truthy()) {
             int16_t offset = static_cast<int16_t>(bx);
-            frame->ip += offset * 4;
+            frame->ip += offset;
         }
         DISPATCH();
     }
@@ -563,7 +565,7 @@ InterpretResult VM::run() {
         frame->ip += 4;
         if (S(a).is_truthy()) {
             int16_t offset = static_cast<int16_t>(bx);
-            frame->ip += offset * 4;
+            frame->ip += offset;
         }
         DISPATCH();
     }
@@ -1390,6 +1392,158 @@ InterpretResult VM::run() {
             RETURN_RUNTIME_ERROR;
         }
         REFRESH_FRAME();
+        DISPATCH();
+    }
+
+    CASE(WIDE): {
+        // Wide instruction: [WIDE:8][op:8][A:16][B:16][C:16] = 8 bytes total
+        uint8_t* wip = frame->ip;
+        uint8_t wide_op = wip[1];
+        uint16_t wa = (wip[2] << 8) | wip[3];
+        uint16_t wb = (wip[4] << 8) | wip[5];
+        uint16_t wc = (wip[6] << 8) | wip[7];
+        frame->ip += WIDE_INST_SIZE;
+
+        switch (static_cast<Opcode>(wide_op)) {
+            case Opcode::LOAD_CONST: S(wa) = frame->closure->function->constants[(wb << 8) | wc]; break;
+            case Opcode::LOAD_NIL: S(wa) = Value(); break;
+            case Opcode::LOAD_TRUE: S(wa) = Value(true); break;
+            case Opcode::LOAD_FALSE: S(wa) = Value(false); break;
+            case Opcode::MOVE: S(wa) = S(wb); break;
+            case Opcode::GET_LOCAL: S(wa) = stack_[frame->base_register + wb]; break;
+            case Opcode::SET_LOCAL: stack_[frame->base_register + wb] = S(wa); break;
+            case Opcode::GET_UPVALUE: {
+                auto* uv = frame->closure->upvalues[wb];
+                S(wa) = uv->closed.is_nil() ? *uv->location : uv->closed;
+                break;
+            }
+            case Opcode::SET_UPVALUE: {
+                auto* uv = frame->closure->upvalues[wb];
+                if (uv->location == &uv->closed || uv->closed.is_nil()) {
+                    *uv->location = S(wa);
+                } else {
+                    uv->closed = S(wa);
+                }
+                break;
+            }
+            case Opcode::ADD: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) {
+                    S(wa) = Value(rb.get_number() + rc.get_number());
+                } else if (rb.is_string() && rc.is_string()) {
+                    auto* result = get_string_table().intern(rb.as_string()->value + rc.as_string()->value);
+                    S(wa) = Value(static_cast<Obj*>(result));
+                } else {
+                    runtime_error("Operands must be two numbers or two strings");
+                    RETURN_RUNTIME_ERROR;
+                }
+                break;
+            }
+            case Opcode::SUB: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) { S(wa) = Value(rb.get_number() - rc.get_number()); }
+                else { runtime_error("Operands must be two numbers"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::MUL: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) { S(wa) = Value(rb.get_number() * rc.get_number()); }
+                else { runtime_error("Operands must be two numbers"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::DIV: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) {
+                    if (rc.get_number() == 0) { runtime_error("Division by zero"); RETURN_RUNTIME_ERROR; }
+                    S(wa) = Value(rb.get_number() / rc.get_number());
+                } else { runtime_error("Operands must be two numbers"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::MOD: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) {
+                    if (rc.get_number() == 0) { runtime_error("Division by zero"); RETURN_RUNTIME_ERROR; }
+                    S(wa) = Value(fmod(rb.get_number(), rc.get_number()));
+                } else { runtime_error("Operands must be two numbers"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::NEG: {
+                Value& rb = S(wb);
+                if (rb.is_number()) { S(wa) = Value(-rb.get_number()); }
+                else { runtime_error("Operand must be a number"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::EQ: S(wa) = Value(S(wb) == S(wc)); break;
+            case Opcode::NEQ: S(wa) = Value(S(wb) != S(wc)); break;
+            case Opcode::LT: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) { S(wa) = Value(rb.get_number() < rc.get_number()); }
+                else if (rb.is_string() && rc.is_string()) { S(wa) = Value(rb.as_string()->value < rc.as_string()->value); }
+                else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::LTE: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) { S(wa) = Value(rb.get_number() <= rc.get_number()); }
+                else if (rb.is_string() && rc.is_string()) { S(wa) = Value(rb.as_string()->value <= rc.as_string()->value); }
+                else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::GT: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) { S(wa) = Value(rb.get_number() > rc.get_number()); }
+                else if (rb.is_string() && rc.is_string()) { S(wa) = Value(rb.as_string()->value > rc.as_string()->value); }
+                else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::GTE: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) { S(wa) = Value(rb.get_number() >= rc.get_number()); }
+                else if (rb.is_string() && rc.is_string()) { S(wa) = Value(rb.as_string()->value >= rc.as_string()->value); }
+                else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::NOT: S(wa) = Value(!S(wb).is_truthy()); break;
+            case Opcode::CLOSE_UPVALUE: {
+                Value* slot_ptr = &stack_[frame->base_register + wa];
+                while (open_upvalues_ && open_upvalues_->location >= slot_ptr) {
+                    ObjUpvalue* uv = open_upvalues_;
+                    uv->closed = *uv->location;
+                    uv->location = &uv->closed;
+                    open_upvalues_ = uv->next_upvalue;
+                }
+                break;
+            }
+            case Opcode::RETURN: {
+                Value result = S(wa);
+                // Close upvalues at this frame's base
+                {
+                    Value* slot_ptr = &stack_[frame->base_register];
+                    while (open_upvalues_ && open_upvalues_->location >= slot_ptr) {
+                        ObjUpvalue* uv = open_upvalues_;
+                        uv->closed = *uv->location;
+                        uv->location = &uv->closed;
+                        open_upvalues_ = uv->next_upvalue;
+                    }
+                }
+                int callee_pos = frame->callee_stack_pos;
+                int caller_top = frame->caller_stack_top;
+                if (active_fiber_ && frame_count_ == active_fiber_->frame_base) {
+                    active_fiber_->state = ObjFiber::State::Done;
+                    active_fiber_ = active_fiber_->parent;
+                }
+                frame_count_--;
+                if (frame_count_ == 0) { stack_[0] = result; stack_top_ = 1; return InterpretResult::Ok; }
+                stack_top_ = std::max(caller_top, callee_pos + 1);
+                stack_[callee_pos] = result;
+                REFRESH_FRAME();
+                break;
+            }
+            case Opcode::PRINT: std::cout << S(wa).to_string() << std::endl; break;
+            default:
+                runtime_error("Opcode %d cannot be used with WIDE prefix", wide_op);
+                RETURN_RUNTIME_ERROR;
+        }
         DISPATCH();
     }
 

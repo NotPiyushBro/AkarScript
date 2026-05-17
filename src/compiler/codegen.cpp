@@ -343,14 +343,14 @@ void CodeGenerator::compile_logical(LogicalExpr* node, int reg) {
         size_t jump = emit_jump(op_byte(Opcode::JMP_IF_FALSE), reg, 0);
         int right = compile_expr(node->right);
         emit(op_byte(Opcode::MOVE), reg, right, 0);
-        patch_jump(jump, static_cast<int16_t>(current_offset() - jump - 1));
+        patch_jump(jump, static_cast<int16_t>(current_offset() - jump - INST_SIZE));
     } else { // "or"
         int left = compile_expr(node->left);
         emit(op_byte(Opcode::MOVE), reg, left, 0);
         size_t jump = emit_jump(op_byte(Opcode::JMP_IF_TRUE), reg, 0);
         int right = compile_expr(node->right);
         emit(op_byte(Opcode::MOVE), reg, right, 0);
-        patch_jump(jump, static_cast<int16_t>(current_offset() - jump - 1));
+        patch_jump(jump, static_cast<int16_t>(current_offset() - jump - INST_SIZE));
     }
 }
 
@@ -489,15 +489,16 @@ void CodeGenerator::compile_block(BlockStmt* node) {
 void CodeGenerator::compile_if(IfStmt* node) {
     int cond = compile_expr(node->condition);
     size_t then_jump = emit_jump(op_byte(Opcode::JMP_IF_FALSE), cond, 0);
+
     compile_stmt(node->then_branch);
     if (node->else_branch) {
         size_t else_jump = emit_jump(op_byte(Opcode::JMP), 0, 0);
-        patch_jump(then_jump, static_cast<int16_t>(current_offset() - then_jump - 1));
+        patch_jump(then_jump, static_cast<int16_t>(current_offset() - then_jump - INST_SIZE));
         compile_stmt(node->else_branch);
         // JMP does NOT advance IP first
         patch_jump(else_jump, static_cast<int16_t>(current_offset() - else_jump));
     } else {
-        patch_jump(then_jump, static_cast<int16_t>(current_offset() - then_jump - 1));
+        patch_jump(then_jump, static_cast<int16_t>(current_offset() - then_jump - INST_SIZE));
     }
 }
 
@@ -520,9 +521,9 @@ void CodeGenerator::compile_while(WhileStmt* node) {
     int16_t back_offset = static_cast<int16_t>(loop_start - current_offset());
     emit_bx(op_byte(Opcode::JMP), 0, static_cast<uint16_t>(back_offset));
 
-    patch_jump(exit_jump, static_cast<int16_t>(current_offset() - exit_jump - 1));
+    patch_jump(exit_jump, static_cast<int16_t>(current_offset() - exit_jump - INST_SIZE));
 
-    // Patch breaks to point here (JMP does NOT advance IP first, so no -1)
+    // Patch breaks to point here (JMP does NOT advance IP first)
     for (size_t i = old_break_size; i < breaks.size(); i++) {
         patch_jump(breaks[i], static_cast<int16_t>(current_offset() - breaks[i]));
     }
@@ -566,7 +567,7 @@ void CodeGenerator::compile_for(ForStmt* node) {
     emit_bx(op_byte(Opcode::JMP), 0, static_cast<uint16_t>(back_offset));
 
     if (exit_jump > 0) {
-        patch_jump(exit_jump, static_cast<int16_t>(current_offset() - exit_jump - 1));
+        patch_jump(exit_jump, static_cast<int16_t>(current_offset() - exit_jump - INST_SIZE));
     }
 
     for (size_t i = old_break_size; i < breaks.size(); i++) {
@@ -617,7 +618,7 @@ void CodeGenerator::compile_for_in(ForInStmt* node) {
     int16_t back_offset = static_cast<int16_t>(loop_start - current_offset());
     emit_bx(op_byte(Opcode::JMP), 0, static_cast<uint16_t>(back_offset));
 
-    patch_jump(exit_jump, static_cast<int16_t>(current_offset() - exit_jump - 1));
+    patch_jump(exit_jump, static_cast<int16_t>(current_offset() - exit_jump - INST_SIZE));
 
     for (size_t i = old_break_size; i < breaks.size(); i++) {
         patch_jump(breaks[i], static_cast<int16_t>(current_offset() - breaks[i]));
@@ -828,7 +829,7 @@ void CodeGenerator::compile_switch(SwitchStmt* node) {
 
         // Patch value matches to jump here (the body)
         for (auto& jmp : value_matches) {
-            patch_jump(jmp, static_cast<int16_t>(current_offset() - jmp - 1));
+            patch_jump(jmp, static_cast<int16_t>(current_offset() - jmp - INST_SIZE));
         }
 
         // Compile body
@@ -883,7 +884,7 @@ void CodeGenerator::compile_try_catch(TryCatchStmt* node) {
     size_t try_end_idx = emit_jump(op_byte(Opcode::TRY_END), 0, 0);
 
     // Catch body starts here — patch TRY_BEGIN to jump here
-    patch_jump(try_begin_idx, static_cast<int16_t>(current_offset() - try_begin_idx - 1));
+    patch_jump(try_begin_idx, static_cast<int16_t>(current_offset() - try_begin_idx - INST_SIZE));
 
     // Bind catch variable
     if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
@@ -902,7 +903,7 @@ void CodeGenerator::compile_try_catch(TryCatchStmt* node) {
     }
 
     // Patch TRY_END to jump past catch
-    patch_jump(try_end_idx, static_cast<int16_t>(current_offset() - try_end_idx - 1));
+    patch_jump(try_end_idx, static_cast<int16_t>(current_offset() - try_end_idx - INST_SIZE));
 }
 
 void CodeGenerator::compile_throw(ThrowStmt* node) {
@@ -969,7 +970,7 @@ void CodeGenerator::compile_include(IncludeStmt* node) {
 // Register allocation
 int CodeGenerator::alloc_register() {
     int reg = current_scope_->next_register++;
-    if (reg >= 255) throw std::runtime_error("Register limit exceeded");
+    if (reg >= 65535) throw std::runtime_error("Register limit exceeded");
     if (current_scope_->next_register > current_scope_->max_registers) {
         current_scope_->max_registers = current_scope_->next_register;
     }
@@ -1054,6 +1055,11 @@ int CodeGenerator::add_upvalue(uint8_t index, bool is_local) {
 
 // Emission helpers
 void CodeGenerator::emit(uint8_t op, uint8_t a, uint8_t b, uint8_t c) {
+    // Auto-emit wide if any register exceeds 8-bit range
+    if (a > 255 || b > 255 || c > 255) {
+        emit_wide(op, a, b, c);
+        return;
+    }
     uint32_t inst = make_instruction(static_cast<Opcode>(op), a, b, c);
     current_scope_->function->bytecode.push_back(static_cast<uint8_t>(inst >> 24));
     current_scope_->function->bytecode.push_back(static_cast<uint8_t>((inst >> 16) & 0xFF));
@@ -1062,6 +1068,12 @@ void CodeGenerator::emit(uint8_t op, uint8_t a, uint8_t b, uint8_t c) {
 }
 
 void CodeGenerator::emit_bx(uint8_t op, uint8_t a, uint16_t bx) {
+    // Auto-emit wide if A exceeds 8-bit range
+    if (a > 255) {
+        // For BX ops, pack BX into B:16 and C:16
+        emit_wide(op, a, (bx >> 8) & 0xFF, bx & 0xFF);
+        return;
+    }
     uint32_t inst = make_instruction_bx(static_cast<Opcode>(op), a, bx);
     current_scope_->function->bytecode.push_back(static_cast<uint8_t>(inst >> 24));
     current_scope_->function->bytecode.push_back(static_cast<uint8_t>((inst >> 16) & 0xFF));
@@ -1069,29 +1081,39 @@ void CodeGenerator::emit_bx(uint8_t op, uint8_t a, uint16_t bx) {
     current_scope_->function->bytecode.push_back(static_cast<uint8_t>(inst & 0xFF));
 }
 
-uint32_t CodeGenerator::emit_jump(uint8_t op, uint8_t a, int16_t offset) {
-    size_t pos = current_offset(); // instruction index, not byte position
-    emit_bx(op, a, static_cast<uint16_t>(offset));
-    return pos;
+void CodeGenerator::emit_wide(uint8_t op, uint16_t a, uint16_t b, uint16_t c) {
+    auto& bc = current_scope_->function->bytecode;
+    // WIDE prefix
+    bc.push_back(op_byte(Opcode::WIDE));
+    // Wide instruction: [op:8][A:16][B:16][C:16] = 7 bytes
+    uint64_t inst = make_wide_instruction(static_cast<Opcode>(op), a, b, c);
+    bc.push_back(static_cast<uint8_t>((inst >> 48) & 0xFF));
+    bc.push_back(static_cast<uint8_t>((inst >> 40) & 0xFF));
+    bc.push_back(static_cast<uint8_t>((inst >> 32) & 0xFF));
+    bc.push_back(static_cast<uint8_t>((inst >> 24) & 0xFF));
+    bc.push_back(static_cast<uint8_t>((inst >> 16) & 0xFF));
+    bc.push_back(static_cast<uint8_t>((inst >> 8) & 0xFF));
+    bc.push_back(static_cast<uint8_t>(inst & 0xFF));
 }
 
-void CodeGenerator::patch_jump(size_t jump_instr_index, int16_t offset) {
+size_t CodeGenerator::emit_jump(uint8_t op, uint8_t a, int16_t offset) {
+    size_t byte_pos = current_scope_->function->bytecode.size();
+    emit_bx(op, a, static_cast<uint16_t>(offset));
+    return byte_pos;
+}
+
+void CodeGenerator::patch_jump(size_t jump_byte_pos, int16_t offset) {
     auto& bc = current_scope_->function->bytecode;
-    size_t byte_pos = jump_instr_index * 4; // convert instruction index to byte position
-    uint32_t inst = (static_cast<uint32_t>(bc[byte_pos]) << 24) |
-                    (static_cast<uint32_t>(bc[byte_pos+1]) << 16) |
-                    (static_cast<uint32_t>(bc[byte_pos+2]) << 8) |
-                    static_cast<uint32_t>(bc[byte_pos+3]);
-    // Replace BX
-    inst = (inst & 0xFFFF0000) | static_cast<uint16_t>(offset);
-    bc[byte_pos] = static_cast<uint8_t>(inst >> 24);
-    bc[byte_pos+1] = static_cast<uint8_t>((inst >> 16) & 0xFF);
-    bc[byte_pos+2] = static_cast<uint8_t>((inst >> 8) & 0xFF);
-    bc[byte_pos+3] = static_cast<uint8_t>(inst & 0xFF);
+    // The jump instruction starts at jump_byte_pos
+    // Normal format: [op:8][A:8][BX:16] at bytes [pos..pos+3]
+    // We need to patch the BX field (bytes at pos+2 and pos+3)
+    uint16_t uoffset = static_cast<uint16_t>(offset);
+    bc[jump_byte_pos + 2] = static_cast<uint8_t>((uoffset >> 8) & 0xFF);
+    bc[jump_byte_pos + 3] = static_cast<uint8_t>(uoffset & 0xFF);
 }
 
 size_t CodeGenerator::current_offset() const {
-    return current_scope_->function->bytecode.size() / 4; // instruction count
+    return current_scope_->function->bytecode.size(); // byte position
 }
 
 size_t CodeGenerator::add_constant(Value value) {

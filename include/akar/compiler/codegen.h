@@ -102,8 +102,9 @@ private:
     // Emission helpers
     void emit(uint8_t op, uint8_t a, uint8_t b, uint8_t c);
     void emit_bx(uint8_t op, uint8_t a, uint16_t bx);
-    uint32_t emit_jump(uint8_t op, uint8_t a, int16_t offset = 0);
-    void patch_jump(size_t jump_index, int16_t offset);
+    void emit_wide(uint8_t op, uint16_t a, uint16_t b, uint16_t c);
+    size_t emit_jump(uint8_t op, uint8_t a, int16_t offset = 0);
+    void patch_jump(size_t jump_byte_pos, int16_t offset);
     size_t current_offset() const;
     size_t add_constant(Value value);
     uint16_t make_constant(Value value);
