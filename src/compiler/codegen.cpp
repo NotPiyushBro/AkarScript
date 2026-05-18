@@ -1118,9 +1118,9 @@ void CodeGenerator::emit(uint8_t op, int a, int b, int c) {
 }
 
 void CodeGenerator::emit_bx(uint8_t op, int a, uint16_t bx) {
-    // Auto-emit wide if A exceeds 8-bit range
-    if (a > 255) {
-        // For BX ops, pack BX into B:16 and C:16
+    // Auto-emit wide if A exceeds 8-bit range, or if next_register > 255 and BX > 255
+    // (normal emit truncates B/C to 8 bits, losing the BX high byte)
+    if (a > 255 || (current_scope_->next_register > 255 && bx > 255)) {
         emit_wide(op, a, (bx >> 8) & 0xFF, bx & 0xFF);
         return;
     }

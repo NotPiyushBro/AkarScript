@@ -955,6 +955,14 @@ InterpretResult VM::run() {
         if (try_count_ > 0) {
             TryFrame& tf = try_frames_[--try_count_];
             while (frame_count_ > tf.frame_count) {
+                // Close upvalues at this frame's base before unwinding
+                Value* slot_ptr = &stack_[frames_[frame_count_ - 1].base_register];
+                while (open_upvalues_ && open_upvalues_->location >= slot_ptr) {
+                    ObjUpvalue* uv = open_upvalues_;
+                    uv->closed = *uv->location;
+                    uv->location = &uv->closed;
+                    open_upvalues_ = uv->next_upvalue;
+                }
                 frame_count_--;
             }
             REFRESH_FRAME();
@@ -1363,13 +1371,21 @@ InterpretResult VM::run() {
         if (fiber->state == ObjFiber::State::Suspended) {
             // Restore saved state from fiber into VM
             int caller_base = frame->base_register;
-            // Restore the fiber's stack region
+            // Restore the fiber's stack region with bounds check
             stack_top_ = caller_base;
+            if (stack_top_ + (int)fiber->saved_stack.size() > MAX_STACK) {
+                runtime_error("Stack overflow resuming fiber");
+                RETURN_RUNTIME_ERROR;
+            }
             for (size_t i = 0; i < fiber->saved_stack.size(); i++) {
                 stack_[stack_top_++] = fiber->saved_stack[i];
             }
             // Restore frames at the current frame_count_ (after caller's frames)
             int new_frame_base = frame_count_;
+            if (new_frame_base + fiber->saved_frame_count > MAX_FRAMES) {
+                runtime_error("Frame overflow resuming fiber");
+                RETURN_RUNTIME_ERROR;
+            }
             frame_count_ = new_frame_base + fiber->saved_frame_count;
             for (int i = 0; i < fiber->saved_frame_count; i++) {
                 auto& sf = fiber->saved_frames[i];
@@ -1524,7 +1540,7 @@ InterpretResult VM::run() {
             case Opcode::MOD: {
                 Value& rb = S(wb); Value& rc = S(wc);
                 if (rb.is_number() && rc.is_number()) {
-                    if (rc.get_number() == 0) { runtime_error("Division by zero"); RETURN_RUNTIME_ERROR; }
+                    if (rc.get_number() == 0) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; }
                     S(wa) = Value(fmod(rb.get_number(), rc.get_number()));
                 } else { runtime_error("Operands must be two numbers"); RETURN_RUNTIME_ERROR; }
                 break;
@@ -1905,10 +1921,18 @@ InterpretResult VM::run() {
                 if (fiber->state == ObjFiber::State::Suspended) {
                     int caller_base = frame->base_register;
                     stack_top_ = caller_base;
+                    if (stack_top_ + (int)fiber->saved_stack.size() > MAX_STACK) {
+                        runtime_error("Stack overflow resuming fiber");
+                        RETURN_RUNTIME_ERROR;
+                    }
                     for (size_t i = 0; i < fiber->saved_stack.size(); i++) {
                         stack_[stack_top_++] = fiber->saved_stack[i];
                     }
                     int new_frame_base = frame_count_;
+                    if (new_frame_base + fiber->saved_frame_count > MAX_FRAMES) {
+                        runtime_error("Frame overflow resuming fiber");
+                        RETURN_RUNTIME_ERROR;
+                    }
                     frame_count_ = new_frame_base + fiber->saved_frame_count;
                     for (int i = 0; i < fiber->saved_frame_count; i++) {
                         auto& sf = fiber->saved_frames[i];
@@ -2281,6 +2305,14 @@ bool VM::throw_to_catch(const std::string& msg) {
     if (try_count_ <= 0) return false;
     TryFrame& tf = try_frames_[--try_count_];
     while (frame_count_ > tf.frame_count) {
+        // Close upvalues at this frame's base before unwinding
+        Value* slot_ptr = &stack_[frames_[frame_count_ - 1].base_register];
+        while (open_upvalues_ && open_upvalues_->location >= slot_ptr) {
+            ObjUpvalue* uv = open_upvalues_;
+            uv->closed = *uv->location;
+            uv->location = &uv->closed;
+            open_upvalues_ = uv->next_upvalue;
+        }
         frame_count_--;
     }
     CallFrame* f = &frames_[frame_count_ - 1];
