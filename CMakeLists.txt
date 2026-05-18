@@ -32,6 +32,10 @@ target_link_libraries(akarc PRIVATE akar_core)
 add_executable(akar src/vm_main.cpp)
 target_link_libraries(akar PRIVATE akar_core)
 
+# Disassembler
+add_executable(akar_disasm src/disasm_main.cpp)
+target_include_directories(akar_disasm PRIVATE include)
+
 # Tests
 enable_testing()
 add_executable(akar_tests tests/test_main.cpp)
