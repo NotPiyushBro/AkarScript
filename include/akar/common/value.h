@@ -21,9 +21,10 @@ struct ObjInstance;
 struct ObjNative;
 struct ObjUpvalue;
 struct ObjFiber;
+struct ObjIterator;
 
 enum class ObjType {
-    String, Array, Map, Function, Closure, Class, Instance, Native, Upvalue, Fiber
+    String, Array, Map, Function, Closure, Class, Instance, Native, Upvalue, Fiber, Iterator
 };
 
 struct Obj {
@@ -98,6 +99,7 @@ struct Value {
     bool is_instance() const;
     bool is_native() const;
     bool is_fiber() const;
+    bool is_iterator() const;
 
     // Accessors
     bool get_bool() const { return bits == TRUE_VAL; }
@@ -129,6 +131,7 @@ struct Value {
     ObjInstance* as_instance() const;
     ObjNative* as_native() const;
     ObjFiber* as_fiber() const;
+    ObjIterator* as_iterator() const;
 
     bool is_truthy() const;
     bool operator==(const Value& other) const;
@@ -159,6 +162,26 @@ struct ObjUpvalue : Obj {
     Value closed;        // value after captured
     ObjUpvalue* next_upvalue = nullptr;
     ObjUpvalue(Value* loc) : location(loc) { type = ObjType::Upvalue; }
+};
+
+// Dedicated iterator type for fast for-in loops
+struct ObjIterator : Obj {
+    enum Kind { ArrayIter, RangeIter, StringIter };
+    Kind kind;
+    // Array iteration
+    ObjArray* arr = nullptr;
+    int arr_index = 0;
+    // Range iteration
+    double range_current = 0;
+    double range_end = 0;
+    double range_step = 0;
+    // String iteration
+    ObjString* str = nullptr;
+    int str_index = 0;
+    // Common
+    bool done = false;
+
+    ObjIterator() { type = ObjType::Iterator; }
 };
 
 struct UpvalueDesc {
@@ -246,6 +269,7 @@ ObjInstance* allocate_instance(ObjClass* klass);
 ObjNative* allocate_native(NativeFn fn, std::string name);
 ObjUpvalue* allocate_upvalue(Value* slot);
 ObjFiber* allocate_fiber();
+ObjIterator* allocate_iterator();
 
 // Global string table for interning
 class StringTable {

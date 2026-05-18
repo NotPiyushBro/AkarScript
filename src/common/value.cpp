@@ -123,6 +123,12 @@ void gc_trace_references(Obj* obj) {
             }
             break;
         }
+        case ObjType::Iterator: {
+            auto* iter = static_cast<ObjIterator*>(obj);
+            if (iter->arr) gc_mark_object(static_cast<Obj*>(iter->arr));
+            if (iter->str) gc_mark_object(static_cast<Obj*>(iter->str));
+            break;
+        }
         case ObjType::String:
         case ObjType::Native:
             break; // no child references
@@ -259,6 +265,15 @@ ObjFiber* allocate_fiber() {
     return obj;
 }
 
+ObjIterator* allocate_iterator() {
+    track_alloc(sizeof(ObjIterator));
+    auto* obj = new ObjIterator();
+    obj->alloc_size = sizeof(ObjIterator);
+    obj->next = g_objects;
+    g_objects = obj;
+    return obj;
+}
+
 ObjString* StringTable::intern(const std::string& s) {
     auto it = strings_.find(s);
     if (it != strings_.end()) return it->second;
@@ -287,6 +302,7 @@ bool Value::is_class() const { return is_obj() && as_obj()->type == ObjType::Cla
 bool Value::is_instance() const { return is_obj() && as_obj()->type == ObjType::Instance; }
 bool Value::is_native() const { return is_obj() && as_obj()->type == ObjType::Native; }
 bool Value::is_fiber() const { return is_obj() && as_obj()->type == ObjType::Fiber; }
+bool Value::is_iterator() const { return is_obj() && as_obj()->type == ObjType::Iterator; }
 
 ObjString* Value::as_string() const { return static_cast<ObjString*>(as_obj()); }
 ObjArray* Value::as_array() const { return static_cast<ObjArray*>(as_obj()); }
@@ -297,6 +313,7 @@ ObjClass* Value::as_class() const { return static_cast<ObjClass*>(as_obj()); }
 ObjInstance* Value::as_instance() const { return static_cast<ObjInstance*>(as_obj()); }
 ObjNative* Value::as_native() const { return static_cast<ObjNative*>(as_obj()); }
 ObjFiber* Value::as_fiber() const { return static_cast<ObjFiber*>(as_obj()); }
+ObjIterator* Value::as_iterator() const { return static_cast<ObjIterator*>(as_obj()); }
 
 bool Value::is_truthy() const {
     if (is_nil()) return false;
@@ -382,6 +399,7 @@ std::string Value::to_string() const {
                 else if (as_fiber()->state == ObjFiber::State::Done) state_str = "done";
                 return std::string("<fiber ") + state_str + ">";
             }
+            case ObjType::Iterator: return "<iterator>";
             case ObjType::Upvalue: return "<upvalue>";
         }
     }

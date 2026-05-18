@@ -1107,7 +1107,7 @@ InterpretResult VM::run() {
             runtime_error("Invalid field name");
             RETURN_RUNTIME_ERROR;
         }
-        std::string field = constants[c].as_string()->value;
+        const std::string& field = constants[c].as_string()->value;
         if (obj.is_instance()) {
             auto& fields = obj.as_instance()->fields;
             auto it = fields.find(field);
@@ -1149,7 +1149,7 @@ InterpretResult VM::run() {
             runtime_error("Invalid field name");
             RETURN_RUNTIME_ERROR;
         }
-        std::string field = constants[b].as_string()->value;
+        const std::string& field = constants[b].as_string()->value;
         if (obj.is_instance()) {
             obj.as_instance()->fields[field] = S(c);
         } else if (obj.is_class()) {
@@ -1233,27 +1233,24 @@ InterpretResult VM::run() {
         uint8_t b = frame->ip[2];
         frame->ip += 4;
         Value iterable = S(b);
-        auto* iter = allocate_map();
+        auto* iter = allocate_iterator();
         if (iterable.is_array()) {
-            iter->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("array_iter")));
-            iter->entries["__data__"] = iterable;
-            iter->entries["__index__"] = Value(0.0);
-            iter->entries["__done__"] = Value(false);
+            iter->kind = ObjIterator::ArrayIter;
+            iter->arr = iterable.as_array();
+            iter->arr_index = 0;
         } else if (iterable.is_map() && iterable.as_map()->entries.count("__type__") &&
                    iterable.as_map()->entries["__type__"].is_string() &&
                    iterable.as_map()->entries["__type__"].as_string()->value == "range") {
             double start_val = iterable.as_map()->entries["start"].get_number();
             double end_val = iterable.as_map()->entries["end"].get_number();
-            iter->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("range_iter")));
-            iter->entries["__current__"] = Value(start_val);
-            iter->entries["__end__"] = Value(end_val);
-            iter->entries["__step__"] = Value(start_val <= end_val ? 1.0 : -1.0);
-            iter->entries["__done__"] = Value(false);
+            iter->kind = ObjIterator::RangeIter;
+            iter->range_current = start_val;
+            iter->range_end = end_val;
+            iter->range_step = start_val <= end_val ? 1.0 : -1.0;
         } else if (iterable.is_string()) {
-            iter->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("string_iter")));
-            iter->entries["__data__"] = iterable;
-            iter->entries["__index__"] = Value(0.0);
-            iter->entries["__done__"] = Value(false);
+            iter->kind = ObjIterator::StringIter;
+            iter->str = iterable.as_string();
+            iter->str_index = 0;
         } else {
             runtime_error("Cannot iterate this value");
             RETURN_RUNTIME_ERROR;
@@ -1266,48 +1263,34 @@ InterpretResult VM::run() {
         uint8_t b = frame->ip[2];
         frame->ip += 4;
         Value iter_val = S(b);
-        if (!iter_val.is_map()) {
+        if (!iter_val.is_iterator()) {
             runtime_error("Invalid iterator");
             RETURN_RUNTIME_ERROR;
         }
-        auto* iter = iter_val.as_map();
-        auto type_it = iter->entries.find("__type__");
-        if (type_it == iter->entries.end() || !type_it->second.is_string()) {
-            runtime_error("Invalid iterator: missing __type__");
-            RETURN_RUNTIME_ERROR;
-        }
-        std::string type = type_it->second.as_string()->value;
-        if (type == "array_iter") {
-            int idx = static_cast<int>(iter->entries["__index__"].get_number());
-            auto* arr = iter->entries["__data__"].as_array();
-            if (idx < (int)arr->elements.size()) {
-                S(a) = arr->elements[idx];
-                iter->entries["__index__"] = Value(static_cast<double>(idx + 1));
+        auto* iter = iter_val.as_iterator();
+        if (iter->kind == ObjIterator::ArrayIter) {
+            if (iter->arr_index < (int)iter->arr->elements.size()) {
+                S(a) = iter->arr->elements[iter->arr_index++];
             } else {
-                iter->entries["__done__"] = Value(true);
+                iter->done = true;
                 S(a) = Value();
             }
-        } else if (type == "range_iter") {
-            double current = iter->entries["__current__"].get_number();
-            double end = iter->entries["__end__"].get_number();
-            double step = iter->entries["__step__"].get_number();
-            bool done = (step > 0) ? (current > end) : (current < end);
+        } else if (iter->kind == ObjIterator::RangeIter) {
+            bool done = (iter->range_step > 0) ? (iter->range_current > iter->range_end) : (iter->range_current < iter->range_end);
             if (!done) {
-                S(a) = Value(current);
-                iter->entries["__current__"] = Value(current + step);
+                S(a) = Value(iter->range_current);
+                iter->range_current += iter->range_step;
             } else {
-                iter->entries["__done__"] = Value(true);
+                iter->done = true;
                 S(a) = Value();
             }
-        } else if (type == "string_iter") {
-            int idx = static_cast<int>(iter->entries["__index__"].get_number());
-            auto& s = iter->entries["__data__"].as_string()->value;
-            if (idx < (int)s.size()) {
-                auto* ch = get_string_table().intern(std::string(1, s[idx]));
+        } else { // StringIter
+            auto& s = iter->str->value;
+            if (iter->str_index < (int)s.size()) {
+                auto* ch = get_string_table().intern(std::string(1, s[iter->str_index++]));
                 S(a) = Value(static_cast<Obj*>(ch));
-                iter->entries["__index__"] = Value(static_cast<double>(idx + 1));
             } else {
-                iter->entries["__done__"] = Value(true);
+                iter->done = true;
                 S(a) = Value();
             }
         }
@@ -1318,8 +1301,8 @@ InterpretResult VM::run() {
         uint8_t b = frame->ip[2];
         frame->ip += 4;
         Value iter = S(b);
-        if (iter.is_map() && iter.as_map()->entries.count("__done__")) {
-            S(a) = iter.as_map()->entries["__done__"];
+        if (iter.is_iterator()) {
+            S(a) = Value(iter.as_iterator()->done);
         } else {
             S(a) = Value(true);
         }
@@ -1702,7 +1685,7 @@ InterpretResult VM::run() {
                     runtime_error("Invalid field name");
                     RETURN_RUNTIME_ERROR;
                 }
-                std::string field = constants[wc].as_string()->value;
+                const std::string& field = constants[wc].as_string()->value;
                 if (obj.is_instance()) {
                     auto& fields = obj.as_instance()->fields;
                     auto it = fields.find(field);
@@ -1804,27 +1787,24 @@ InterpretResult VM::run() {
             }
             case Opcode::ITER_INIT: {
                 Value iterable = S(wb);
-                auto* iter = allocate_map();
+                auto* iter = allocate_iterator();
                 if (iterable.is_array()) {
-                    iter->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("array_iter")));
-                    iter->entries["__data__"] = iterable;
-                    iter->entries["__index__"] = Value(0.0);
-                    iter->entries["__done__"] = Value(false);
+                    iter->kind = ObjIterator::ArrayIter;
+                    iter->arr = iterable.as_array();
+                    iter->arr_index = 0;
                 } else if (iterable.is_map() && iterable.as_map()->entries.count("__type__") &&
                            iterable.as_map()->entries["__type__"].is_string() &&
                            iterable.as_map()->entries["__type__"].as_string()->value == "range") {
                     double start_val = iterable.as_map()->entries["start"].get_number();
                     double end_val = iterable.as_map()->entries["end"].get_number();
-                    iter->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("range_iter")));
-                    iter->entries["__current__"] = Value(start_val);
-                    iter->entries["__end__"] = Value(end_val);
-                    iter->entries["__step__"] = Value(start_val <= end_val ? 1.0 : -1.0);
-                    iter->entries["__done__"] = Value(false);
+                    iter->kind = ObjIterator::RangeIter;
+                    iter->range_current = start_val;
+                    iter->range_end = end_val;
+                    iter->range_step = start_val <= end_val ? 1.0 : -1.0;
                 } else if (iterable.is_string()) {
-                    iter->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("string_iter")));
-                    iter->entries["__data__"] = iterable;
-                    iter->entries["__index__"] = Value(0.0);
-                    iter->entries["__done__"] = Value(false);
+                    iter->kind = ObjIterator::StringIter;
+                    iter->str = iterable.as_string();
+                    iter->str_index = 0;
                 } else {
                     runtime_error("Cannot iterate this value");
                     RETURN_RUNTIME_ERROR;
@@ -1834,48 +1814,34 @@ InterpretResult VM::run() {
             }
             case Opcode::ITER_NEXT: {
                 Value iter_val = S(wb);
-                if (!iter_val.is_map()) {
+                if (!iter_val.is_iterator()) {
                     runtime_error("Invalid iterator");
                     RETURN_RUNTIME_ERROR;
                 }
-                auto* iter = iter_val.as_map();
-                auto type_it = iter->entries.find("__type__");
-                if (type_it == iter->entries.end() || !type_it->second.is_string()) {
-                    runtime_error("Invalid iterator: missing __type__");
-                    RETURN_RUNTIME_ERROR;
-                }
-                std::string type = type_it->second.as_string()->value;
-                if (type == "array_iter") {
-                    int idx = static_cast<int>(iter->entries["__index__"].get_number());
-                    auto* arr = iter->entries["__data__"].as_array();
-                    if (idx < (int)arr->elements.size()) {
-                        S(wa) = arr->elements[idx];
-                        iter->entries["__index__"] = Value(static_cast<double>(idx + 1));
+                auto* iter = iter_val.as_iterator();
+                if (iter->kind == ObjIterator::ArrayIter) {
+                    if (iter->arr_index < (int)iter->arr->elements.size()) {
+                        S(wa) = iter->arr->elements[iter->arr_index++];
                     } else {
-                        iter->entries["__done__"] = Value(true);
+                        iter->done = true;
                         S(wa) = Value();
                     }
-                } else if (type == "range_iter") {
-                    double current = iter->entries["__current__"].get_number();
-                    double end = iter->entries["__end__"].get_number();
-                    double step = iter->entries["__step__"].get_number();
-                    bool done = (step > 0) ? (current > end) : (current < end);
+                } else if (iter->kind == ObjIterator::RangeIter) {
+                    bool done = (iter->range_step > 0) ? (iter->range_current > iter->range_end) : (iter->range_current < iter->range_end);
                     if (!done) {
-                        S(wa) = Value(current);
-                        iter->entries["__current__"] = Value(current + step);
+                        S(wa) = Value(iter->range_current);
+                        iter->range_current += iter->range_step;
                     } else {
-                        iter->entries["__done__"] = Value(true);
+                        iter->done = true;
                         S(wa) = Value();
                     }
-                } else if (type == "string_iter") {
-                    int idx = static_cast<int>(iter->entries["__index__"].get_number());
-                    auto& s = iter->entries["__data__"].as_string()->value;
-                    if (idx < (int)s.size()) {
-                        auto* ch = get_string_table().intern(std::string(1, s[idx]));
+                } else { // StringIter
+                    auto& s = iter->str->value;
+                    if (iter->str_index < (int)s.size()) {
+                        auto* ch = get_string_table().intern(std::string(1, s[iter->str_index++]));
                         S(wa) = Value(static_cast<Obj*>(ch));
-                        iter->entries["__index__"] = Value(static_cast<double>(idx + 1));
                     } else {
-                        iter->entries["__done__"] = Value(true);
+                        iter->done = true;
                         S(wa) = Value();
                     }
                 }
@@ -1883,8 +1849,8 @@ InterpretResult VM::run() {
             }
             case Opcode::ITER_DONE: {
                 Value iter = S(wb);
-                if (iter.is_map() && iter.as_map()->entries.count("__done__")) {
-                    S(wa) = iter.as_map()->entries["__done__"];
+                if (iter.is_iterator()) {
+                    S(wa) = Value(iter.as_iterator()->done);
                 } else {
                     S(wa) = Value(true);
                 }
