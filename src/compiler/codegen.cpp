@@ -1182,8 +1182,13 @@ size_t CodeGenerator::current_offset() const {
 }
 
 size_t CodeGenerator::add_constant(Value value) {
-    current_scope_->function->constants.push_back(value);
-    return current_scope_->function->constants.size() - 1;
+    // Deduplicate constants to save space and delay 65K limit
+    auto& constants = current_scope_->function->constants;
+    for (size_t i = 0; i < constants.size(); i++) {
+        if (constants[i] == value) return i;
+    }
+    constants.push_back(value);
+    return constants.size() - 1;
 }
 
 uint16_t CodeGenerator::make_constant(Value value) {
