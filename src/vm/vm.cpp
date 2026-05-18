@@ -255,7 +255,12 @@ InterpretResult VM::run() {
     };
 
     #define DISPATCH() do { \
-        HANDLE_FIBER_YIELD(); \
+        if (yield_pending_) HANDLE_FIBER_YIELD(); \
+        CHECK_MEMORY_LIMIT(); \
+        goto *dispatch_table[frame->ip[0]]; \
+    } while(0)
+    #define DISPATCH_VERBOSE() do { \
+        if (yield_pending_) HANDLE_FIBER_YIELD(); \
         CHECK_MEMORY_LIMIT(); \
         VLOG("[VM] ip=%d %s a=%d b=%d c=%d base=%d top=%d frames=%d\n", \
              IP_OFFSET(), opcode_names[frame->ip[0]], frame->ip[1], frame->ip[2], frame->ip[3], \
@@ -266,7 +271,7 @@ InterpretResult VM::run() {
 
     for (;;) {
     loop_continue:
-        DISPATCH();
+        if (verbose_) DISPATCH_VERBOSE(); else DISPATCH();
 
     CASE(LOAD_CONST): {
         uint8_t a = frame->ip[1];
