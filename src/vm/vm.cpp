@@ -137,10 +137,11 @@ InterpretResult VM::run_bytecode(const std::vector<uint8_t>& bytecode, const std
 InterpretResult VM::run() {
     CallFrame* frame = &frames_[frame_count_ - 1];
     int base = frame->base_register;
+    uint8_t* ip = frame->ip;  // cached instruction pointer (synced back before call/return)
     int call_a = 0, call_b = 0; // shared between normal CALL and WIDE CALL
 
-    // Helper: refresh frame and base after call/return
-    #define REFRESH_FRAME() do { frame = &frames_[frame_count_ - 1]; base = frame->base_register; } while(0)
+    // Helper: refresh frame, base, and ip after call/return
+    #define REFRESH_FRAME() do { frame = &frames_[frame_count_ - 1]; base = frame->base_register; ip = frame->ip; } while(0)
 
     // Helper: stack slot access via cached base
     #define S(i) stack_[base + (i)]
@@ -198,7 +199,7 @@ InterpretResult VM::run() {
     } while(0)
 
     #define CHECK_MEMORY_LIMIT() do { \
-        if (++opcode_counter >= 1024) { \
+        if (__builtin_expect(++opcode_counter >= 1024, 0)) { \
             opcode_counter = 0; \
             if (get_allocated_bytes() >= get_next_gc()) { \
                 collect_garbage(); \
@@ -213,7 +214,7 @@ InterpretResult VM::run() {
     // Verbose logging macro - only prints when -v flag is set
     #define VLOG(...) do { if (verbose_) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
     // Helper to get IP offset from bytecode start
-    #define IP_OFFSET() (int)(frame->ip - frame->closure->function->bytecode.data())
+    #define IP_OFFSET() (int)(ip - frame->closure->function->bytecode.data())
 
     // Opcode name table for verbose output
     static const char* opcode_names[] = {
@@ -232,6 +233,11 @@ InterpretResult VM::run() {
         "FIBER_YIELD", "FIBER_RESUME", "TAIL_CALL",
         "AWAIT", "THROW", "TRY_BEGIN", "TRY_END",
         "WIDE",
+        // Quickened opcodes
+        "ADD_NUM", "SUB_NUM", "MUL_NUM", "DIV_NUM", "MOD_NUM", "ADD_STR",
+        "EQ_NUM", "NEQ_NUM", "LT_NUM", "LTE_NUM", "GT_NUM", "GTE_NUM",
+        "EQ_JMP", "NEQ_JMP", "LT_JMP", "LTE_JMP", "GT_JMP", "GTE_JMP",
+        "EQ_JMP_F", "NEQ_JMP_F", "LT_JMP_F", "LTE_JMP_F", "GT_JMP_F", "GTE_JMP_F",
     };
 
 #ifdef __GNUC__
@@ -249,6 +255,11 @@ InterpretResult VM::run() {
         &&op_NEW_CLASS, &&op_NEW_INSTANCE, &&op_GET_METHOD, &&op_INVOKE,
         &&op_NEW_RANGE, &&op_ITER_INIT, &&op_ITER_NEXT, &&op_ITER_DONE,
         &&op_PRINT, &&op_HALT, &&op_NOP,
+        // Quickened opcodes
+        &&op_ADD_NUM, &&op_SUB_NUM, &&op_MUL_NUM, &&op_DIV_NUM, &&op_MOD_NUM, &&op_ADD_STR,
+        &&op_EQ_NUM, &&op_NEQ_NUM, &&op_LT_NUM, &&op_LTE_NUM, &&op_GT_NUM, &&op_GTE_NUM,
+        &&op_EQ_JMP, &&op_NEQ_JMP, &&op_LT_JMP, &&op_LTE_JMP, &&op_GT_JMP, &&op_GTE_JMP,
+        &&op_EQ_JMP_F, &&op_NEQ_JMP_F, &&op_LT_JMP_F, &&op_LTE_JMP_F, &&op_GT_JMP_F, &&op_GTE_JMP_F,
         &&op_FIBER_YIELD, &&op_FIBER_RESUME, &&op_TAIL_CALL,
         &&op_AWAIT, &&op_THROW, &&op_TRY_BEGIN, &&op_TRY_END,
         &&op_WIDE,
@@ -257,90 +268,90 @@ InterpretResult VM::run() {
     #define DISPATCH() do { \
         if (yield_pending_) HANDLE_FIBER_YIELD(); \
         CHECK_MEMORY_LIMIT(); \
-        goto *dispatch_table[frame->ip[0]]; \
+        goto *dispatch_table[ip[0]]; \
     } while(0)
     #define DISPATCH_VERBOSE() do { \
         if (yield_pending_) HANDLE_FIBER_YIELD(); \
         CHECK_MEMORY_LIMIT(); \
         VLOG("[VM] ip=%d %s a=%d b=%d c=%d base=%d top=%d frames=%d\n", \
-             IP_OFFSET(), opcode_names[frame->ip[0]], frame->ip[1], frame->ip[2], frame->ip[3], \
+             IP_OFFSET(), opcode_names[ip[0]], ip[1], ip[2], ip[3], \
              base, stack_top_, frame_count_); \
-        goto *dispatch_table[frame->ip[0]]; \
+        goto *dispatch_table[ip[0]]; \
     } while(0)
     #define CASE(op) op_##op
 
     for (;;) {
     loop_continue:
-        if (verbose_) DISPATCH_VERBOSE(); else DISPATCH();
+        DISPATCH();
 
     CASE(LOAD_CONST): {
-        uint8_t a = frame->ip[1];
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
         auto& constants = frame->closure->function->constants;
         if (bx >= constants.size()) { runtime_error("Invalid constant index"); RETURN_RUNTIME_ERROR; }
         S(a) = constants[bx];
         DISPATCH();
     }
     CASE(LOAD_NIL): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         S(a) = Value();
         DISPATCH();
     }
     CASE(LOAD_TRUE): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         S(a) = Value(true);
         DISPATCH();
     }
     CASE(LOAD_FALSE): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         S(a) = Value(false);
         DISPATCH();
     }
     CASE(MOVE): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         S(a) = S(b);
         DISPATCH();
     }
     CASE(GET_LOCAL): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         S(a) = stack_[base + b];
         DISPATCH();
     }
     CASE(SET_LOCAL): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         stack_[base + b] = S(a);
         DISPATCH();
     }
     CASE(GET_UPVALUE): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         if (b >= frame->closure->upvalues.size()) { runtime_error("Invalid upvalue index"); RETURN_RUNTIME_ERROR; }
         S(a) = *frame->closure->upvalues[b]->location;
         DISPATCH();
     }
     CASE(SET_UPVALUE): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         if (b >= frame->closure->upvalues.size()) { runtime_error("Invalid upvalue index"); RETURN_RUNTIME_ERROR; }
         *frame->closure->upvalues[b]->location = S(a);
         DISPATCH();
     }
     CASE(GET_GLOBAL): {
-        uint8_t a = frame->ip[1];
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
         auto& constants = frame->closure->function->constants;
         if (bx >= constants.size() || !constants[bx].is_string()) {
             runtime_error("Invalid global name");
@@ -356,9 +367,9 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(SET_GLOBAL): {
-        uint8_t a = frame->ip[1];
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
         auto& constants = frame->closure->function->constants;
         if (bx >= constants.size() || !constants[bx].is_string()) {
             runtime_error("Invalid global name");
@@ -369,94 +380,101 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(ADD): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
         Value& rb = S(b);
         Value& rc = S(c);
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() + rc.get_number());
+            *(ip - 4) = op_byte(Opcode::ADD_NUM); // quicken
         } else if (rb.is_string() && rc.is_string()) {
             auto* result = get_string_table().intern(
                 rb.as_string()->value + rc.as_string()->value);
             S(a) = Value(static_cast<Obj*>(result));
+            *(ip - 4) = op_byte(Opcode::ADD_STR); // quicken
         } else {
             runtime_error("Operands must be two numbers or two strings");
             RETURN_RUNTIME_ERROR;
         }
         DISPATCH();
     }
+    CASE(ADD_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() + S(c).get_number());
+        DISPATCH();
+    }
+    CASE(ADD_STR): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        auto* result = get_string_table().intern(S(b).as_string()->value + S(c).as_string()->value);
+        S(a) = Value(static_cast<Obj*>(result));
+        DISPATCH();
+    }
     CASE(SUB): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        Value& rb = S(b);
-        Value& rc = S(c);
-        if (!rb.is_number() || !rc.is_number()) {
-            runtime_error("Operands must be numbers");
-            RETURN_RUNTIME_ERROR;
-        }
-        S(a) = Value(rb.get_number() - rc.get_number());
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            S(a) = Value(rb.get_number() - rc.get_number());
+            *(ip - 4) = op_byte(Opcode::SUB_NUM);
+        } else { runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(SUB_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() - S(c).get_number());
         DISPATCH();
     }
     CASE(MUL): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        Value& rb = S(b);
-        Value& rc = S(c);
-        if (!rb.is_number() || !rc.is_number()) {
-            runtime_error("Operands must be numbers");
-            RETURN_RUNTIME_ERROR;
-        }
-        S(a) = Value(rb.get_number() * rc.get_number());
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            S(a) = Value(rb.get_number() * rc.get_number());
+            *(ip - 4) = op_byte(Opcode::MUL_NUM);
+        } else { runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(MUL_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() * S(c).get_number());
         DISPATCH();
     }
     CASE(DIV): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        Value& rb = S(b);
-        Value& rc = S(c);
-        if (!rb.is_number() || !rc.is_number()) {
-            runtime_error("Operands must be numbers");
-            RETURN_RUNTIME_ERROR;
-        }
-        double divisor = rc.get_number();
-        if (divisor == 0) {
-            runtime_error("Division by zero");
-            RETURN_RUNTIME_ERROR;
-        }
-        S(a) = Value(rb.get_number() / divisor);
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            double d = rc.get_number();
+            if (__builtin_expect(d == 0, 0)) { runtime_error("Division by zero"); RETURN_RUNTIME_ERROR; }
+            S(a) = Value(rb.get_number() / d);
+            *(ip - 4) = op_byte(Opcode::DIV_NUM);
+        } else { runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(DIV_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() / S(c).get_number());
         DISPATCH();
     }
     CASE(MOD): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        Value& rb = S(b);
-        Value& rc = S(c);
-        if (!rb.is_number() || !rc.is_number()) {
-            runtime_error("Operands must be numbers");
-            RETURN_RUNTIME_ERROR;
-        }
-        double divisor = rc.get_number();
-        if (divisor == 0) {
-            runtime_error("Modulo by zero");
-            RETURN_RUNTIME_ERROR;
-        }
-        S(a) = Value(std::fmod(rb.get_number(), divisor));
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            double d = rc.get_number();
+            if (__builtin_expect(d == 0, 0)) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; }
+            S(a) = Value(std::fmod(rb.get_number(), d));
+            *(ip - 4) = op_byte(Opcode::MOD_NUM);
+        } else { runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(MOD_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(std::fmod(S(b).get_number(), S(c).get_number()));
         DISPATCH();
     }
     CASE(NEG): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         Value& rb = S(b);
         if (!rb.is_number()) {
             runtime_error("Operand must be a number");
@@ -466,126 +484,174 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(EQ): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        S(a) = Value(S(b) == S(c));
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            S(a) = Value(rb.get_number() == rc.get_number());
+            *(ip - 4) = op_byte(Opcode::EQ_NUM);
+        } else {
+            S(a) = Value(rb == rc);
+        }
+        DISPATCH();
+    }
+    CASE(EQ_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() == S(c).get_number());
         DISPATCH();
     }
     CASE(NEQ): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        S(a) = Value(S(b) != S(c));
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            S(a) = Value(rb.get_number() != rc.get_number());
+            *(ip - 4) = op_byte(Opcode::NEQ_NUM);
+        } else {
+            S(a) = Value(rb != rc);
+        }
+        DISPATCH();
+    }
+    CASE(NEQ_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() != S(c).get_number());
         DISPATCH();
     }
     CASE(LT): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        Value& rb = S(b);
-        Value& rc = S(c);
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() < rc.get_number());
+            *(ip - 4) = op_byte(Opcode::LT_NUM);
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value < rc.as_string()->value);
-        } else {
-            runtime_error("Operands must be two numbers or two strings");
-            RETURN_RUNTIME_ERROR;
-        }
+        } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(LT_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() < S(c).get_number());
         DISPATCH();
     }
     CASE(LTE): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        Value& rb = S(b);
-        Value& rc = S(c);
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() <= rc.get_number());
+            *(ip - 4) = op_byte(Opcode::LTE_NUM);
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value <= rc.as_string()->value);
-        } else {
-            runtime_error("Operands must be two numbers or two strings");
-            RETURN_RUNTIME_ERROR;
-        }
+        } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(LTE_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() <= S(c).get_number());
         DISPATCH();
     }
     CASE(GT): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        Value& rb = S(b);
-        Value& rc = S(c);
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() > rc.get_number());
+            *(ip - 4) = op_byte(Opcode::GT_NUM);
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value > rc.as_string()->value);
-        } else {
-            runtime_error("Operands must be two numbers or two strings");
-            RETURN_RUNTIME_ERROR;
-        }
+        } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(GT_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() > S(c).get_number());
         DISPATCH();
     }
     CASE(GTE): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
-        Value& rb = S(b);
-        Value& rc = S(c);
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() >= rc.get_number());
+            *(ip - 4) = op_byte(Opcode::GTE_NUM);
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value >= rc.as_string()->value);
-        } else {
-            runtime_error("Operands must be two numbers or two strings");
-            RETURN_RUNTIME_ERROR;
-        }
+        } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(GTE_NUM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(S(b).get_number() >= S(c).get_number());
         DISPATCH();
     }
     CASE(NOT): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         S(a) = Value(!S(b).is_truthy());
         DISPATCH();
     }
     CASE(JMP): {
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
+        uint16_t bx = (ip[2] << 8) | ip[3];
         int16_t offset = static_cast<int16_t>(bx);
-        frame->ip += offset;
+        ip += offset;
         DISPATCH();
     }
     CASE(JMP_IF_FALSE): {
-        uint8_t a = frame->ip[1];
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
-        frame->ip += 4;
-        if (!S(a).is_truthy()) {
-            int16_t offset = static_cast<int16_t>(bx);
-            frame->ip += offset;
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
+        // Fast path: check for false/nil directly (most common from comparisons)
+        uint64_t bits = S(a).bits;
+        if (__builtin_expect(bits == Value::FALSE_VAL || bits == Value::NIL_VAL, 0)) {
+            ip += static_cast<int16_t>(bx);
+        } else if (__builtin_expect((bits & Value::NAN_BASE) == Value::NAN_BASE && bits != Value::TRUE_VAL, 0)) {
+            // Non-boolean object - use full is_truthy check
+            if (!S(a).is_truthy()) {
+                ip += static_cast<int16_t>(bx);
+            }
         }
         DISPATCH();
     }
     CASE(JMP_IF_TRUE): {
-        uint8_t a = frame->ip[1];
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
         if (S(a).is_truthy()) {
             int16_t offset = static_cast<int16_t>(bx);
-            frame->ip += offset;
+            ip += offset;
         }
         DISPATCH();
     }
+    // Fused compare-and-jump-if-true handlers (order: EQ,NEQ,LT,LTE,GT,GTE)
+    #define FUSED_CMP_JMP_TRUE(name, cmp_op) \
+    CASE(name): { \
+        int8_t offset = static_cast<int8_t>(ip[1]); \
+        uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; \
+        if (S(b).get_number() cmp_op S(c).get_number()) ip += offset; \
+        DISPATCH(); \
+    }
+    FUSED_CMP_JMP_TRUE(EQ_JMP, ==)
+    FUSED_CMP_JMP_TRUE(NEQ_JMP, !=)
+    FUSED_CMP_JMP_TRUE(LT_JMP, <)
+    FUSED_CMP_JMP_TRUE(LTE_JMP, <=)
+    FUSED_CMP_JMP_TRUE(GT_JMP, >)
+    FUSED_CMP_JMP_TRUE(GTE_JMP, >=)
+    #undef FUSED_CMP_JMP_TRUE
+    // Fused compare-and-jump-if-false handlers (order: EQ,NEQ,LT,LTE,GT,GTE)
+    #define FUSED_CMP_JMP_FALSE(name, cmp_op) \
+    CASE(name): { \
+        int8_t offset = static_cast<int8_t>(ip[1]); \
+        uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; \
+        if (!(S(b).get_number() cmp_op S(c).get_number())) ip += offset; \
+        DISPATCH(); \
+    }
+    FUSED_CMP_JMP_FALSE(EQ_JMP_F, ==)
+    FUSED_CMP_JMP_FALSE(NEQ_JMP_F, !=)
+    FUSED_CMP_JMP_FALSE(LT_JMP_F, <)
+    FUSED_CMP_JMP_FALSE(LTE_JMP_F, <=)
+    FUSED_CMP_JMP_FALSE(GT_JMP_F, >)
+    FUSED_CMP_JMP_FALSE(GTE_JMP_F, >=)
+    #undef FUSED_CMP_JMP_FALSE
     CASE(CALL): {
-        call_a = frame->ip[1];
-        call_b = frame->ip[2];
-        frame->ip += 4;
+        call_a = ip[1];
+        call_b = ip[2];
+        ip += 4;
     }
     // Shared entry point for WIDE CALL (call_a/call_b already set, IP already advanced)
     do_call: {
@@ -603,10 +669,36 @@ InterpretResult VM::run() {
         Value callee = stack_[callee_abs];
         VLOG("[CALL] a=%d args=%d callee_abs=%d callee=%s\n", a, arg_count, callee_abs, callee.to_string().c_str());
         if (callee.is_closure()) {
-            if (!call(callee.as_closure(), arg_count, a, callee_abs)) {
-                RETURN_RUNTIME_ERROR;
+            auto* closure = callee.as_closure();
+            // Inline fast path: non-varargs, correct arity
+            if (frame_count_ >= MAX_FRAMES) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
+            int fixed_arity = closure->function->arity;
+            if (closure->function->has_varargs || arg_count != fixed_arity) {
+                frame->ip = ip; if (!call(closure, arg_count, a, callee_abs)) { RETURN_RUNTIME_ERROR; }
+                REFRESH_FRAME();
+            } else {
+                int args_abs = callee_abs + 1;
+                frame->ip = ip;
+                CallFrame* new_frame = &frames_[frame_count_++];
+                new_frame->closure = closure;
+                new_frame->ip = closure->function->bytecode.data();
+                new_frame->base_register = args_abs;
+                new_frame->return_register = a;
+                new_frame->callee_stack_pos = callee_abs;
+                new_frame->caller_stack_top = stack_top_;
+                new_frame->slots = &stack_[args_abs];
+                int needed = closure->function->register_count;
+                // Fast nil initialization using direct bit pattern write
+                static constexpr uint64_t NIL_BITS = 0x7FFC000000000000ULL;
+                for (int i = arg_count; i < needed; i++) {
+                    stack_[args_abs + i].bits = NIL_BITS;
+                }
+                int new_top = args_abs + needed;
+                if (new_top > stack_top_) stack_top_ = new_top;
+                frame = new_frame;
+                base = args_abs;
+                ip = new_frame->ip;
             }
-            REFRESH_FRAME();
         } else if (callee.is_native()) {
             // Special case: fiber_yield - handle directly without calling native
             if (active_fiber_ && callee.as_native()->name == "fiber_yield") {
@@ -730,7 +822,7 @@ InterpretResult VM::run() {
                     }
                     resume_has_value_ = false;
                     fib->frame_base = frame_count_; // set before call() increments frame_count_
-                    if (!call(fib->entry, arg_count, resume_return_reg_, callee_abs2)) {
+                    frame->ip = ip; if (!call(fib->entry, arg_count, resume_return_reg_, callee_abs2)) {
                         active_fiber_ = nullptr;
                         RETURN_RUNTIME_ERROR;
                     }
@@ -756,7 +848,7 @@ InterpretResult VM::run() {
                 }
                 stack_[callee_abs + 1] = instance_val;
                 stack_top_ += 1;
-                if (!call(init_closure, total_args, a, callee_abs)) {
+                frame->ip = ip; if (!call(init_closure, total_args, a, callee_abs)) {
                     RETURN_RUNTIME_ERROR;
                 }
                 REFRESH_FRAME();
@@ -770,9 +862,9 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(TAIL_CALL): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         int arg_count = b;
         int callee_abs = base + a;
         Value callee = stack_[callee_abs];
@@ -798,7 +890,7 @@ InterpretResult VM::run() {
                 stack_[base + i] = Value();
             }
             frame->closure = closure;
-            frame->ip = closure->function->bytecode.data();
+            ip = closure->function->bytecode.data();
             stack_top_ = base + needed;
         } else if (callee.is_native()) {
             auto* native = callee.as_native();
@@ -848,7 +940,7 @@ InterpretResult VM::run() {
                     stack_[base + i] = Value();
                 }
                 frame->closure = init_closure;
-                frame->ip = init_closure->function->bytecode.data();
+                ip = init_closure->function->bytecode.data();
                 stack_top_ = base + needed;
             }
         } else {
@@ -858,9 +950,9 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(CLOSURE): {
-        uint8_t a = frame->ip[1];
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
         auto& constants = frame->closure->function->constants;
         if (bx >= constants.size() || !constants[bx].is_obj() ||
             constants[bx].as_obj()->type != ObjType::Function) {
@@ -893,8 +985,8 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(CLOSE_UPVALUE): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         Value* slot_ptr = &stack_[base + a];
         while (open_upvalues_ && open_upvalues_->location >= slot_ptr) {
             ObjUpvalue* uv = open_upvalues_;
@@ -905,33 +997,34 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(RETURN): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         Value result = S(a);
-        VLOG("[RETURN] a=%d result=%s callee_pos=%d frames=%d\n", a, result.to_string().c_str(), frame->callee_stack_pos, frame_count_ - 1);
         int callee_pos = frame->callee_stack_pos;
         int saved_top = frame->caller_stack_top;
         frame_count_--;
-        if (frame_count_ == 0) {
+        if (__builtin_expect(frame_count_ == 0, 0)) {
             stack_top_ = 0;
             stack_[stack_top_++] = result;
             return InterpretResult::Ok;
         }
-        // If this was the last fiber frame (frame_count_ dropped to fiber's frame_base)
-        // and we have an active fiber, mark it as done
-        if (active_fiber_ && frame_count_ == active_fiber_->frame_base) {
+        // If this was the last fiber frame
+        if (__builtin_expect(active_fiber_ && frame_count_ == active_fiber_->frame_base, 0)) {
             active_fiber_->state = ObjFiber::State::Done;
             active_fiber_ = active_fiber_->parent;
         }
-        // Restore caller's stack_top (preserving registers above callee_pos)
+        // Restore caller's stack_top and result
         stack_top_ = std::max(saved_top, callee_pos + 1);
         stack_[callee_pos] = result;
-        REFRESH_FRAME();
+        // Inline REFRESH_FRAME for speed
+        frame = &frames_[frame_count_ - 1];
+        base = frame->base_register;
+        ip = frame->ip;
         DISPATCH();
     }
     CASE(AWAIT): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         Value val = S(a);
         if (val.is_nil()) {
             int callee_pos = frame->callee_stack_pos;
@@ -950,8 +1043,8 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(THROW): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         Value exception = S(a);
         std::string msg;
         if (exception.is_string()) msg = exception.as_string()->value;
@@ -971,7 +1064,7 @@ InterpretResult VM::run() {
                 frame_count_--;
             }
             REFRESH_FRAME();
-            frame->ip = tf.catch_ip;
+            ip = tf.catch_ip;
             if (exception.is_string()) {
                 S(tf.catch_register) = exception;
             } else {
@@ -984,47 +1077,47 @@ InterpretResult VM::run() {
         RETURN_RUNTIME_ERROR;
     }
     CASE(TRY_BEGIN): {
-        uint8_t a = frame->ip[1];
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
         if (try_count_ >= MAX_TRY) {
             runtime_error("Too many nested try blocks");
             RETURN_RUNTIME_ERROR;
         }
         TryFrame& tf = try_frames_[try_count_++];
         tf.frame_count = frame_count_;
-        tf.catch_ip = frame->ip + static_cast<int16_t>(bx);
+        tf.catch_ip = ip + static_cast<int16_t>(bx);
         tf.catch_register = a;
         DISPATCH();
     }
     CASE(TRY_END): {
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
-        frame->ip += 4;
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
         if (try_count_ > 0) try_count_--;
         if (bx > 0) {
-            frame->ip += bx;
+            ip += bx;
         }
         DISPATCH();
     }
     CASE(NEW_ARRAY): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         auto* arr = allocate_array();
         S(a) = Value(static_cast<Obj*>(arr));
         DISPATCH();
     }
     CASE(NEW_MAP): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         auto* map = allocate_map();
         S(a) = Value(static_cast<Obj*>(map));
         DISPATCH();
     }
     CASE(GET_INDEX): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
         Value obj = S(b);
         Value idx = S(c);
         if (obj.is_array()) {
@@ -1069,10 +1162,10 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(SET_INDEX): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
         Value obj = S(a);
         Value idx = S(b);
         Value val = S(c);
@@ -1102,10 +1195,10 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(GET_FIELD): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
         Value obj = S(b);
         auto& constants = frame->closure->function->constants;
         if (c >= constants.size() || !constants[c].is_string()) {
@@ -1144,10 +1237,10 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(SET_FIELD): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
         Value obj = S(a);
         auto& constants = frame->closure->function->constants;
         if (b >= constants.size() || !constants[b].is_string()) {
@@ -1168,9 +1261,9 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(NEW_CLASS): {
-        uint8_t a = frame->ip[1];
-        uint16_t bx = (frame->ip[2] << 8) | frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
         auto& constants = frame->closure->function->constants;
         if (bx >= constants.size() || !constants[bx].is_string()) {
             runtime_error("Invalid class name");
@@ -1181,9 +1274,9 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(NEW_INSTANCE): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         if (!S(b).is_class()) {
             runtime_error("Cannot instantiate non-class");
             RETURN_RUNTIME_ERROR;
@@ -1193,10 +1286,10 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(GET_METHOD): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
         Value obj = S(b);
         auto& constants = frame->closure->function->constants;
         if (c >= constants.size() || !constants[c].is_string()) {
@@ -1218,10 +1311,10 @@ InterpretResult VM::run() {
         RETURN_RUNTIME_ERROR;
     }
     CASE(NEW_RANGE): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
         if (!S(b).is_number() || !S(c).is_number()) {
             runtime_error("Range bounds must be numbers");
             RETURN_RUNTIME_ERROR;
@@ -1234,9 +1327,9 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(ITER_INIT): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         Value iterable = S(b);
         auto* iter = allocate_iterator();
         if (iterable.is_array()) {
@@ -1264,9 +1357,9 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(ITER_NEXT): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         Value iter_val = S(b);
         if (!iter_val.is_iterator()) {
             runtime_error("Invalid iterator");
@@ -1302,9 +1395,9 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(ITER_DONE): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
         Value iter = S(b);
         if (iter.is_iterator()) {
             S(a) = Value(iter.as_iterator()->done);
@@ -1314,19 +1407,19 @@ InterpretResult VM::run() {
         DISPATCH();
     }
     CASE(PRINT): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         std::cout << S(a).to_string() << std::endl;
         DISPATCH();
     }
     CASE(HALT):
         return InterpretResult::Ok;
     CASE(NOP):
-        frame->ip += 4;
+        ip += 4;
         DISPATCH();
     CASE(FIBER_YIELD): {
-        uint8_t a = frame->ip[1];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        ip += 4;
         if (skip_native_call_) {
             skip_native_call_ = false;
             S(a) = skip_native_result_;
@@ -1341,10 +1434,10 @@ InterpretResult VM::run() {
         DISPATCH(); // next DISPATCH will handle the actual yield via HANDLE_FIBER_YIELD
     }
     CASE(FIBER_RESUME): {
-        uint8_t a = frame->ip[1];
-        uint8_t b = frame->ip[2];
-        uint8_t c = frame->ip[3];
-        frame->ip += 4;
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
         Value fiber_val = S(b);
         Value resume_val = S(c);
         if (!fiber_val.is_fiber()) {
@@ -1421,7 +1514,7 @@ InterpretResult VM::run() {
             }
         }
         fiber->frame_base = frame_count_; // set before call() increments frame_count_
-        if (!call(fiber->entry, arg_count, a, callee_abs)) {
+        frame->ip = ip; if (!call(fiber->entry, arg_count, a, callee_abs)) {
             active_fiber_ = nullptr;
             RETURN_RUNTIME_ERROR;
         }
@@ -1431,13 +1524,13 @@ InterpretResult VM::run() {
 
     CASE(WIDE): {
         // Wide instruction: [WIDE:8][op:8][A:16][B:16][C:16] = 8 bytes total
-        uint8_t* wip = frame->ip;
+        uint8_t* wip = ip;
         uint8_t wide_op = wip[1];
         uint16_t wa = (wip[2] << 8) | wip[3];
         uint16_t wb = (wip[4] << 8) | wip[5];
         uint16_t wc = (wip[6] << 8) | wip[7];
         VLOG("[WIDE] op=%d a=%d b=%d c=%d ip_offset=%d\n", wide_op, wa, wb, wc, (int)(wip - frame->closure->function->bytecode.data()));
-        frame->ip += WIDE_INST_SIZE;
+        ip += WIDE_INST_SIZE;
 
         switch (static_cast<Opcode>(wide_op)) {
             case Opcode::LOAD_CONST: {
@@ -1607,20 +1700,20 @@ InterpretResult VM::run() {
                 int16_t offset = static_cast<int16_t>((wb << 8) | wc);
                 // patch_jump subtracts 4 for WIDE, but JMP callers don't subtract INST_SIZE
                 // so we need to add INST_SIZE back to compensate
-                frame->ip = wip + INST_SIZE + offset;
+                ip = wip + INST_SIZE + offset;
                 break;
             }
             case Opcode::JMP_IF_FALSE: {
                 int16_t offset = static_cast<int16_t>((wb << 8) | wc);
                 if (!S(wa).is_truthy()) {
-                    frame->ip += offset;
+                    ip += offset;
                 }
                 break;
             }
             case Opcode::JMP_IF_TRUE: {
                 int16_t offset = static_cast<int16_t>((wb << 8) | wc);
                 if (S(wa).is_truthy()) {
-                    frame->ip += offset;
+                    ip += offset;
                 }
                 break;
             }
@@ -1945,7 +2038,7 @@ InterpretResult VM::run() {
                     }
                 }
                 fiber->frame_base = frame_count_;
-                if (!call(fiber->entry, arg_count, wa, callee_abs)) {
+                frame->ip = ip; if (!call(fiber->entry, arg_count, wa, callee_abs)) {
                     active_fiber_ = nullptr;
                     RETURN_RUNTIME_ERROR;
                 }
@@ -1977,7 +2070,7 @@ InterpretResult VM::run() {
                         stack_[frame->base_register + i] = Value();
                     }
                     frame->closure = closure;
-                    frame->ip = closure->function->bytecode.data();
+                    ip = closure->function->bytecode.data();
                     stack_top_ = frame->base_register + needed;
                 } else if (callee.is_native()) {
                     auto* native = callee.as_native();
@@ -2023,7 +2116,7 @@ InterpretResult VM::run() {
                             stack_[frame->base_register + i] = Value();
                         }
                         frame->closure = init_closure;
-                        frame->ip = init_closure->function->bytecode.data();
+                        ip = init_closure->function->bytecode.data();
                         stack_top_ = frame->base_register + needed;
                     }
                 } else {
@@ -2062,7 +2155,7 @@ InterpretResult VM::run() {
                         frame_count_--;
                     }
                     REFRESH_FRAME();
-                    frame->ip = tf.catch_ip;
+                    ip = tf.catch_ip;
                     if (exception.is_string()) {
                         S(tf.catch_register) = exception;
                     } else {
@@ -2082,7 +2175,7 @@ InterpretResult VM::run() {
                 }
                 TryFrame& tf = try_frames_[try_count_++];
                 tf.frame_count = frame_count_;
-                tf.catch_ip = frame->ip + static_cast<int16_t>(bx);
+                tf.catch_ip = ip + static_cast<int16_t>(bx);
                 tf.catch_register = wa;
                 break;
             }
@@ -2090,7 +2183,7 @@ InterpretResult VM::run() {
                 uint16_t bx = (wb << 8) | wc;
                 if (try_count_ > 0) try_count_--;
                 if (bx > 0) {
-                    frame->ip += bx;
+                    ip += bx;
                 }
                 break;
             }
@@ -2146,19 +2239,19 @@ InterpretResult VM::run() {
     loop_continue:
         HANDLE_FIBER_YIELD();
         CHECK_MEMORY_LIMIT();
-        uint8_t instruction = frame->ip[0];
+        uint8_t instruction = ip[0];
         Opcode op = static_cast<Opcode>(instruction);
         switch (op) {
             case Opcode::LOAD_CONST: {
-                uint8_t a = frame->ip[1]; uint16_t bx = (frame->ip[2] << 8) | frame->ip[3]; frame->ip += 4;
+                uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4;
                 S(a) = frame->closure->function->constants[bx]; break;
             }
-            case Opcode::LOAD_NIL: { uint8_t a = frame->ip[1]; frame->ip += 4; S(a) = Value(); break; }
-            case Opcode::LOAD_TRUE: { uint8_t a = frame->ip[1]; frame->ip += 4; S(a) = Value(true); break; }
-            case Opcode::LOAD_FALSE: { uint8_t a = frame->ip[1]; frame->ip += 4; S(a) = Value(false); break; }
-            case Opcode::MOVE: { uint8_t a = frame->ip[1]; uint8_t b = frame->ip[2]; frame->ip += 4; S(a) = S(b); break; }
+            case Opcode::LOAD_NIL: { uint8_t a = ip[1]; ip += 4; S(a) = Value(); break; }
+            case Opcode::LOAD_TRUE: { uint8_t a = ip[1]; ip += 4; S(a) = Value(true); break; }
+            case Opcode::LOAD_FALSE: { uint8_t a = ip[1]; ip += 4; S(a) = Value(false); break; }
+            case Opcode::MOVE: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; S(a) = S(b); break; }
             case Opcode::HALT: return InterpretResult::Ok;
-            case Opcode::NOP: frame->ip += 4; break;
+            case Opcode::NOP: ip += 4; break;
             default: runtime_error("Unknown opcode"); RETURN_RUNTIME_ERROR;
         }
     }

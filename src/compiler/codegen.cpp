@@ -911,6 +911,12 @@ void CodeGenerator::compile_switch(SwitchStmt* node) {
         patch_jump(jmp, static_cast<int16_t>(current_offset() - jmp));
     }
 
+    // Patch break jumps to end of switch (break in switch = jump to end)
+    for (auto& jmp : current_scope_->break_jumps) {
+        patch_jump(jmp, static_cast<int16_t>(current_offset() - jmp));
+    }
+    current_scope_->break_jumps.clear();
+
     free_register(); // cond_reg
 }
 

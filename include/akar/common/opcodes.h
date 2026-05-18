@@ -81,6 +81,38 @@ enum class Opcode : uint8_t {
     HALT,           // stop execution
     NOP,            // no operation
 
+    // Quickened (type-specialized) opcodes - emitted by VM at runtime
+    // These skip type checks since types were verified on first execution
+    ADD_NUM,        // A = R[B] + R[C] (both known numbers)
+    SUB_NUM,        // A = R[B] - R[C] (both known numbers)
+    MUL_NUM,        // A = R[B] * R[C] (both known numbers)
+    DIV_NUM,        // A = R[B] / R[C] (both known numbers)
+    MOD_NUM,        // A = R[B] % R[C] (both known numbers)
+    ADD_STR,        // A = R[B] .. R[C] (both known strings)
+    EQ_NUM,         // A = R[B] == R[C] (both known numbers)
+    NEQ_NUM,        // A = R[B] != R[C] (both known numbers)
+    LT_NUM,         // A = R[B] < R[C] (both known numbers)
+    LTE_NUM,        // A = R[B] <= R[C] (both known numbers)
+    GT_NUM,         // A = R[B] > R[C] (both known numbers)
+    GTE_NUM,        // A = R[B] >= R[C] (both known numbers)
+
+    // Fused compare-and-branch (quickened from CMP + JMP_IF_FALSE)
+    // Format: [op] [cmp_A] [offset_hi] [offset_lo] - jumps if comparison result matches
+    // Fused compare-and-jump-if-true (order matches EQ,NEQ,LT,LTE,GT,GTE)
+    EQ_JMP,         // if R[B] == R[C] then skip offset bytes
+    NEQ_JMP,        // if R[B] != R[C] then skip offset bytes
+    LT_JMP,         // if R[B] < R[C] then skip offset bytes
+    LTE_JMP,        // if R[B] <= R[C] then skip offset bytes
+    GT_JMP,         // if R[B] > R[C] then skip offset bytes
+    GTE_JMP,        // if R[B] >= R[C] then skip offset bytes
+    // Fused compare-and-jump-if-false (order matches EQ,NEQ,LT,LTE,GT,GTE)
+    EQ_JMP_F,       // if !(R[B] == R[C]) then skip offset bytes
+    NEQ_JMP_F,      // if !(R[B] != R[C]) then skip offset bytes
+    LT_JMP_F,       // if !(R[B] < R[C]) then skip offset bytes
+    LTE_JMP_F,      // if !(R[B] <= R[C]) then skip offset bytes
+    GT_JMP_F,       // if !(R[B] > R[C]) then skip offset bytes
+    GTE_JMP_F,      // if !(R[B] >= R[C]) then skip offset bytes
+
     // Fiber/Coroutine
     FIBER_YIELD,    // yield R[A] from current fiber, resume value goes to R[A]
     FIBER_RESUME,   // resume fiber R[B], pass R[C] as resume value, result in R[A]

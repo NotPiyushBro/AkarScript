@@ -5,8 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Compiler warnings
-add_compile_options(-Wall -Wextra -Wpedantic -O2)
+# Compiler warnings and optimization
+add_compile_options(-Wall -Wextra -Wpedantic -O3 -march=native -flto)
+add_link_options(-flto)
 
 # Akar core library
 add_library(akar_core STATIC
