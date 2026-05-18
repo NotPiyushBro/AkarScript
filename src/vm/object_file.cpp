@@ -314,86 +314,100 @@ SectionHeader ObjectFileReader::find_section(std::ifstream& file, const ObjectFi
     return section;
 }
 
+// Maximum allowed size for any single allocation from a file (16 MB)
+static constexpr uint32_t MAX_FILE_ALLOC = 16 * 1024 * 1024;
+
+// Helper to read big-endian integers with error checking
+static bool read_bytes(std::ifstream& file, void* buf, size_t n) {
+    file.read(reinterpret_cast<char*>(buf), n);
+    return file.good();
+}
+static uint8_t read_u8(std::ifstream& file, bool* ok = nullptr) {
+    uint8_t v; if (!read_bytes(file, &v, 1)) { if (ok) *ok = false; return 0; } return v;
+}
+static uint16_t read_u16(std::ifstream& file, bool* ok = nullptr) {
+    uint8_t b[2]; if (!read_bytes(file, b, 2)) { if (ok) *ok = false; return 0; }
+    return (b[0] << 8) | b[1];
+}
+static uint32_t read_u32(std::ifstream& file, bool* ok = nullptr) {
+    uint8_t b[4]; if (!read_bytes(file, b, 4)) { if (ok) *ok = false; return 0; }
+    return (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
+}
+static double read_f64(std::ifstream& file, bool* ok = nullptr) {
+    uint8_t b[8]; if (!read_bytes(file, b, 8)) { if (ok) *ok = false; return 0.0; }
+    uint64_t bits = 0;
+    for (int j = 0; j < 8; j++) bits = (bits << 8) | b[j];
+    double num; std::memcpy(&num, &bits, 8); return num;
+}
+static std::string read_str(std::ifstream& file, bool* ok = nullptr) {
+    uint32_t len = read_u32(file, ok);
+    if (ok && !*ok) return "";
+    if (len > MAX_FILE_ALLOC) { if (ok) *ok = false; return ""; }
+    std::string s(len, '\0');
+    if (!read_bytes(file, &s[0], len)) { if (ok) *ok = false; return ""; }
+    return s;
+}
+
 std::vector<std::string> ObjectFileReader::deserialize_strings(std::ifstream& file, const SectionHeader& section) {
     std::vector<std::string> result;
     if (section.size == 0) return result;
     file.seekg(section.offset);
 
-    // Read count (big-endian uint32)
-    uint8_t count_bytes[4];
-    file.read(reinterpret_cast<char*>(count_bytes), 4);
-    uint32_t count = (count_bytes[0] << 24) | (count_bytes[1] << 16) | (count_bytes[2] << 8) | count_bytes[3];
+    bool ok = true;
+    uint32_t count = read_u32(file, &ok);
+    if (!ok || count > MAX_FILE_ALLOC) return result;
 
     for (uint32_t i = 0; i < count; i++) {
-        // Read string length (big-endian uint32)
-        uint8_t len_bytes[4];
-        file.read(reinterpret_cast<char*>(len_bytes), 4);
-        uint32_t len = (len_bytes[0] << 24) | (len_bytes[1] << 16) | (len_bytes[2] << 8) | len_bytes[3];
-
+        uint32_t len = read_u32(file, &ok);
+        if (!ok || len > MAX_FILE_ALLOC) return result;
         std::string s(len, '\0');
-        file.read(&s[0], len);
-        result.push_back(s);
+        if (!read_bytes(file, &s[0], len)) return result;
+        result.push_back(std::move(s));
     }
     return result;
 }
 
-// Helper to read big-endian integers
-static uint8_t read_u8(std::ifstream& file) { uint8_t v; file.read(reinterpret_cast<char*>(&v), 1); return v; }
-static uint16_t read_u16(std::ifstream& file) {
-    uint8_t b[2]; file.read(reinterpret_cast<char*>(b), 2);
-    return (b[0] << 8) | b[1];
-}
-static uint32_t read_u32(std::ifstream& file) {
-    uint8_t b[4]; file.read(reinterpret_cast<char*>(b), 4);
-    return (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
-}
-static double read_f64(std::ifstream& file) {
-    uint8_t b[8]; file.read(reinterpret_cast<char*>(b), 8);
-    uint64_t bits = 0;
-    for (int j = 0; j < 8; j++) bits = (bits << 8) | b[j];
-    double num; std::memcpy(&num, &bits, 8); return num;
-}
-static std::string read_str(std::ifstream& file) {
-    uint32_t len = read_u32(file);
-    std::string s(len, '\0'); file.read(&s[0], len); return s;
-}
-
 static Value deserialize_value(std::ifstream& file, const std::vector<std::string>& strings) {
-    uint8_t type = read_u8(file);
+    bool ok = true;
+    uint8_t type = read_u8(file, &ok);
+    if (!ok) return Value();
     switch (type) {
         case 0: return Value(); // Nil
-        case 1: return Value(read_u8(file) != 0); // Bool
-        case 2: return Value(read_f64(file)); // Number
+        case 1: return Value(read_u8(file, &ok) != 0); // Bool
+        case 2: return Value(read_f64(file, &ok)); // Number
         case 3: { // Obj
-            uint8_t subtag = read_u8(file);
+            uint8_t subtag = read_u8(file, &ok);
+            if (!ok) return Value();
             if (subtag == 0) { // string
-                uint32_t idx = read_u32(file);
-                if (idx < strings.size()) {
-                    return Value(static_cast<Obj*>(get_string_table().intern(strings[idx])));
-                }
-                return Value();
+                uint32_t idx = read_u32(file, &ok);
+                if (!ok || idx >= strings.size()) return Value();
+                return Value(static_cast<Obj*>(get_string_table().intern(strings[idx])));
             } else if (subtag == 1) { // function
                 auto* func = allocate_function();
-                func->name = read_str(file);
-                func->arity = read_u16(file);
-                func->register_count = read_u16(file);
-                func->has_varargs = (read_u8(file) != 0);
-                uint32_t uv_count = read_u32(file);
+                func->name = read_str(file, &ok);
+                if (!ok) return Value();
+                func->arity = read_u16(file, &ok);
+                func->register_count = read_u16(file, &ok);
+                func->has_varargs = (read_u8(file, &ok) != 0);
+                if (!ok) return Value();
+                uint32_t uv_count = read_u32(file, &ok);
+                if (!ok || uv_count > MAX_FILE_ALLOC) return Value();
                 for (uint32_t i = 0; i < uv_count; i++) {
                     UpvalueDesc desc;
-                    desc.index = read_u8(file);
-                    desc.is_local = read_u8(file) != 0;
+                    desc.index = read_u8(file, &ok);
+                    desc.is_local = read_u8(file, &ok) != 0;
+                    if (!ok) return Value();
                     func->upvalue_descs.push_back(desc);
                 }
-                // Recursively deserialize function's constants
-                uint32_t const_count = read_u32(file);
+                uint32_t const_count = read_u32(file, &ok);
+                if (!ok || const_count > MAX_FILE_ALLOC) return Value();
                 for (uint32_t i = 0; i < const_count; i++) {
                     func->constants.push_back(deserialize_value(file, strings));
                 }
-                // Bytecode
-                uint32_t bc_size = read_u32(file);
+                uint32_t bc_size = read_u32(file, &ok);
+                if (!ok || bc_size > MAX_FILE_ALLOC) return Value();
                 func->bytecode.resize(bc_size);
-                file.read(reinterpret_cast<char*>(func->bytecode.data()), bc_size);
+                if (!read_bytes(file, func->bytecode.data(), bc_size)) return Value();
                 return Value(static_cast<Obj*>(func));
             }
             return Value();
