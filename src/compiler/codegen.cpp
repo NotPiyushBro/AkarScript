@@ -357,23 +357,18 @@ void CodeGenerator::compile_logical(LogicalExpr* node, int reg) {
 void CodeGenerator::compile_call(CallExpr* node, int reg) {
     // Check if this is a method call (callee is FieldAccessExpr)
     bool is_method_call = (node->callee->type == NodeType::FieldAccess);
-    int object_reg = -1;
     if (is_method_call) {
         auto* field = static_cast<FieldAccessExpr*>(node->callee.get());
-        object_reg = compile_expr(field->object);
-        // Get the method
+        int object_reg = compile_expr(field->object);
         uint16_t method_const = make_identifier_constant(field->field);
-        // Allocate callee register
         int callee = alloc_register();
         emit(op_byte(Opcode::GET_FIELD), callee, object_reg, method_const);
 
-        // Compile args
         std::vector<int> arg_regs;
         arg_regs.push_back(object_reg); // "this" is first arg
         for (auto& arg : node->arguments) {
             arg_regs.push_back(compile_expr(arg));
         }
-        // Move args to consecutive registers after callee (right-to-left to avoid clobbering)
         for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
             int target = callee + 1 + i;
             if (arg_regs[i] != target) {
@@ -384,35 +379,47 @@ void CodeGenerator::compile_call(CallExpr* node, int reg) {
         if (callee != reg) {
             emit(op_byte(Opcode::MOVE), reg, callee, 0);
         }
-        free_register(); // free callee register
+        // Free callee register
+        free_register();
+        // Free arg registers that are temporaries (above callee+1)
+        for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
+            int target = callee + 1 + i;
+            if (arg_regs[i] >= callee + 1 && arg_regs[i] != target) {
+                free_register();
+            }
+        }
     } else {
         int callee = compile_expr(node->callee);
         std::vector<int> arg_regs;
         for (auto& arg : node->arguments) {
             arg_regs.push_back(compile_expr(arg));
         }
-        // If callee is in a high register, move it to a low temp (CALL needs 8-bit register)
         int call_callee = callee;
         bool used_temp_callee = false;
         if (callee > 255) {
-            call_callee = alloc_register(); // should get a low register since temps are freed
+            call_callee = alloc_register();
             emit(op_byte(Opcode::MOVE), call_callee, callee, 0);
             used_temp_callee = true;
         }
-        // Move args to consecutive registers after call_callee (right-to-left to avoid clobbering)
         for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
             int target = call_callee + 1 + i;
             if (arg_regs[i] != target) {
                 emit(op_byte(Opcode::MOVE), target, arg_regs[i], 0);
             }
         }
-        emit(op_byte(Opcode::CALL), call_callee, static_cast<uint8_t>(arg_regs.size()), 0);
-        // Move result from call_callee to target register if needed
+        emit(op_byte(Opcode::CALL), call_callee, static_cast<int>(arg_regs.size()), 0);
         if (call_callee != reg) {
             emit(op_byte(Opcode::MOVE), reg, call_callee, 0);
         }
         if (used_temp_callee) {
-            free_register(); // free the temp callee register
+            free_register();
+        }
+        // Free arg registers that are temporaries
+        for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
+            int target = call_callee + 1 + i;
+            if (arg_regs[i] >= call_callee + 1 && arg_regs[i] != target) {
+                free_register();
+            }
         }
     }
 }
