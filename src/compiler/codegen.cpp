@@ -108,7 +108,9 @@ ObjFunction* CodeGenerator::compile_function(const std::string& name, const std:
     // Ensure return (if not already returned by implicit return above)
     auto& bc = scope.function->bytecode;
     bool already_returns = bc.size() >= 4 &&
-        static_cast<Opcode>(bc[bc.size() - 4]) == Opcode::RETURN;
+        (static_cast<Opcode>(bc[bc.size() - 4]) == Opcode::RETURN ||
+         (bc.size() >= 8 && static_cast<Opcode>(bc[bc.size() - 8]) == Opcode::WIDE &&
+          static_cast<Opcode>(bc[bc.size() - 7]) == Opcode::RETURN));
     if (!already_returns) {
         close_captured();
         int ret_reg = alloc_register();
@@ -650,11 +652,12 @@ void CodeGenerator::compile_for_in(ForInStmt* node) {
     }
     continues.resize(old_continue_size);
 
+    // Free registers in reverse allocation order: done_reg, then end_scope frees var_reg,
+    // then iter_obj, then iter_reg (from compile_expr)
     free_register(); // done_reg
-    free_register(); // var_reg
+    end_scope(); // frees var_reg (declared as local)
     free_register(); // iter_obj
     free_register(); // iter_reg
-    end_scope();
 }
 
 void CodeGenerator::compile_break(BreakStmt*) {
@@ -816,19 +819,15 @@ void CodeGenerator::compile_destructuring(DestructuringStmt* node) {
         emit_bx(op_byte(Opcode::LOAD_CONST), idx_reg, idx_const);
         int val_reg = alloc_register();
         emit(op_byte(Opcode::GET_INDEX), val_reg, init_reg, idx_reg);
-        free_register(); // val_reg (N+1)
-        free_register(); // idx_reg (N)
+        free_register(); // idx_reg (N) — val_reg (N+1) stays
         // Declare as local or set as global
         if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
             uint16_t name_const = make_identifier_constant(node->names[i]);
             emit_bx(op_byte(Opcode::SET_GLOBAL), val_reg, name_const);
+            free_register(); // val_reg no longer needed for global path
         } else {
-            // Re-allocate val_reg as a persistent local
-            int local_reg = alloc_register();
-            if (local_reg != val_reg) {
-                emit(op_byte(Opcode::MOVE), local_reg, val_reg, 0);
-            }
-            declare_local(node->names[i], local_reg);
+            declare_local(node->names[i], val_reg);
+            // val_reg is now owned by the local, don't free
         }
     }
     free_register(); // init_reg
