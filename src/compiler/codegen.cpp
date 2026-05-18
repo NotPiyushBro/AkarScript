@@ -916,6 +916,7 @@ void CodeGenerator::compile_try_catch(TryCatchStmt* node) {
     if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
         uint16_t name_const = make_identifier_constant(node->catch_var);
         emit_bx(op_byte(Opcode::SET_GLOBAL), err_reg, name_const);
+        free_register(); // err_reg no longer needed for global path
     } else {
         declare_local(node->catch_var, err_reg);
     }
