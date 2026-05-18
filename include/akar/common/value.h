@@ -89,8 +89,7 @@ struct Value {
     bool is_nil() const { return bits == NIL_VAL; }
     bool is_bool() const { return bits == FALSE_VAL || bits == TRUE_VAL; }
     bool is_number() const { return (bits & NAN_BASE) != NAN_BASE; }
-    // Objects have both NAN_BASE and PTR_TAG bits set (nil/bool don't have PTR_TAG)
-    bool is_obj() const { return (bits & (NAN_BASE | PTR_TAG)) == (NAN_BASE | PTR_TAG); }
+    bool is_obj() const { return (bits & NAN_BASE) == NAN_BASE && bits != NAN_BASE && !is_nil() && !is_bool(); }
     bool is_string() const;
     bool is_array() const;
     bool is_map() const;
