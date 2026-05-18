@@ -30,6 +30,7 @@ struct Obj {
     ObjType type;
     bool marked = false;
     Obj* next = nullptr; // GC linked list
+    size_t alloc_size = 0; // tracked allocation size for GC sweep
     virtual ~Obj() = default;
 };
 

@@ -152,8 +152,8 @@ void gc_sweep() {
             Obj* unreached = obj;
             obj = obj->next;
             *prev = obj;
-            if (g_allocated_bytes >= sizeof(Obj)) {
-                g_allocated_bytes -= sizeof(Obj);
+            if (g_allocated_bytes >= unreached->alloc_size) {
+                g_allocated_bytes -= unreached->alloc_size;
             } else {
                 g_allocated_bytes = 0;
             }
@@ -170,6 +170,7 @@ ObjString* allocate_string(std::string value) {
     size_t bytes = sizeof(ObjString) + value.capacity();
     track_alloc(bytes);
     auto* obj = new ObjString(std::move(value));
+    obj->alloc_size = bytes;
     obj->next = g_objects;
     g_objects = obj;
     return obj;
@@ -178,6 +179,7 @@ ObjString* allocate_string(std::string value) {
 ObjArray* allocate_array() {
     track_alloc(sizeof(ObjArray));
     auto* obj = new ObjArray();
+    obj->alloc_size = sizeof(ObjArray);
     obj->next = g_objects;
     g_objects = obj;
     return obj;
@@ -186,6 +188,7 @@ ObjArray* allocate_array() {
 ObjMap* allocate_map() {
     track_alloc(sizeof(ObjMap));
     auto* obj = new ObjMap();
+    obj->alloc_size = sizeof(ObjMap);
     obj->next = g_objects;
     g_objects = obj;
     return obj;
@@ -194,6 +197,7 @@ ObjMap* allocate_map() {
 ObjFunction* allocate_function() {
     track_alloc(sizeof(ObjFunction));
     auto* obj = new ObjFunction();
+    obj->alloc_size = sizeof(ObjFunction);
     obj->next = g_objects;
     g_objects = obj;
     return obj;
@@ -202,6 +206,7 @@ ObjFunction* allocate_function() {
 ObjClosure* allocate_closure(ObjFunction* func) {
     track_alloc(sizeof(ObjClosure));
     auto* obj = new ObjClosure(func);
+    obj->alloc_size = sizeof(ObjClosure);
     obj->next = g_objects;
     g_objects = obj;
     return obj;
@@ -211,6 +216,7 @@ ObjClass* allocate_class(std::string name) {
     size_t bytes = sizeof(ObjClass) + name.capacity();
     track_alloc(bytes);
     auto* obj = new ObjClass(std::move(name));
+    obj->alloc_size = bytes;
     obj->next = g_objects;
     g_objects = obj;
     return obj;
@@ -219,6 +225,7 @@ ObjClass* allocate_class(std::string name) {
 ObjInstance* allocate_instance(ObjClass* klass) {
     track_alloc(sizeof(ObjInstance));
     auto* obj = new ObjInstance(klass);
+    obj->alloc_size = sizeof(ObjInstance);
     obj->next = g_objects;
     g_objects = obj;
     return obj;
@@ -228,6 +235,7 @@ ObjNative* allocate_native(NativeFn fn, std::string name) {
     size_t bytes = sizeof(ObjNative) + name.capacity();
     track_alloc(bytes);
     auto* obj = new ObjNative(std::move(fn), std::move(name));
+    obj->alloc_size = bytes;
     obj->next = g_objects;
     g_objects = obj;
     return obj;
@@ -236,6 +244,7 @@ ObjNative* allocate_native(NativeFn fn, std::string name) {
 ObjUpvalue* allocate_upvalue(Value* slot) {
     track_alloc(sizeof(ObjUpvalue));
     auto* obj = new ObjUpvalue(slot);
+    obj->alloc_size = sizeof(ObjUpvalue);
     obj->next = g_objects;
     g_objects = obj;
     return obj;
@@ -244,6 +253,7 @@ ObjUpvalue* allocate_upvalue(Value* slot) {
 ObjFiber* allocate_fiber() {
     track_alloc(sizeof(ObjFiber));
     auto* obj = new ObjFiber();
+    obj->alloc_size = sizeof(ObjFiber);
     obj->next = g_objects;
     g_objects = obj;
     return obj;
