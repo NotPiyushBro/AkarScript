@@ -740,12 +740,18 @@ InterpretResult VM::run() {
             auto init_it = methods.find("init");
             if (init_it == methods.end()) init_it = methods.find(akar_hash_symbol("init"));
             if (init_it != methods.end() && init_it->second.is_closure()) {
+                auto* init_closure = init_it->second.as_closure();
+                int total_args = arg_count + 1;
+                if (total_args != init_closure->function->arity) {
+                    runtime_error("Expected %d arguments but got %d", init_closure->function->arity, total_args);
+                    RETURN_RUNTIME_ERROR;
+                }
                 for (int i = arg_count; i > 0; i--) {
                     stack_[callee_abs + 1 + i] = stack_[callee_abs + 1 + i - 1];
                 }
                 stack_[callee_abs + 1] = instance_val;
                 stack_top_ += 1;
-                if (!call(init_it->second.as_closure(), arg_count + 1, a, callee_abs)) {
+                if (!call(init_closure, total_args, a, callee_abs)) {
                     RETURN_RUNTIME_ERROR;
                 }
                 REFRESH_FRAME();
@@ -811,12 +817,17 @@ InterpretResult VM::run() {
             auto init_it = methods.find("init");
             if (init_it == methods.end()) init_it = methods.find(akar_hash_symbol("init"));
             if (init_it != methods.end() && init_it->second.is_closure()) {
+                auto* init_closure = init_it->second.as_closure();
+                int total_args = arg_count + 1;
+                if (total_args != init_closure->function->arity) {
+                    runtime_error("Expected %d arguments but got %d", init_closure->function->arity, total_args);
+                    RETURN_RUNTIME_ERROR;
+                }
                 for (int i = arg_count; i > 0; i--) {
                     stack_[callee_abs + 1 + i] = stack_[callee_abs + 1 + i - 1];
                 }
                 stack_[callee_abs + 1] = instance_val;
                 stack_top_ += 1;
-                auto* init_closure = init_it->second.as_closure();
                 while (open_upvalues_ && open_upvalues_->location >= &stack_[base]) {
                     ObjUpvalue* uv = open_upvalues_;
                     uv->closed = *uv->location;
@@ -824,7 +835,6 @@ InterpretResult VM::run() {
                     open_upvalues_ = uv->next_upvalue;
                 }
                 int args_src = callee_abs + 1;
-                int total_args = arg_count + 1;
                 for (int i = 0; i < total_args; i++) {
                     stack_[base + i] = stack_[args_src + i];
                 }
@@ -1325,6 +1335,10 @@ InterpretResult VM::run() {
             skip_native_call_ = false;
             S(a) = skip_native_result_;
             DISPATCH();
+        }
+        if (!active_fiber_) {
+            runtime_error("Cannot yield outside a fiber");
+            RETURN_RUNTIME_ERROR;
         }
         yield_pending_ = true;
         yield_value_ = S(a);
