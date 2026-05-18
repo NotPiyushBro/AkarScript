@@ -1390,15 +1390,13 @@ InterpretResult VM::run() {
             for (int i = 0; i < fiber->saved_frame_count; i++) {
                 auto& sf = fiber->saved_frames[i];
                 auto& f = frames_[new_frame_base + i];
-                f.base_register = sf.base_register;
+                f.base_register = sf.base_register + caller_base;
                 f.return_register = sf.return_register;
-                f.callee_stack_pos = sf.callee_stack_pos;
+                f.callee_stack_pos = sf.callee_stack_pos + caller_base;
                 f.caller_stack_top = sf.caller_stack_top;
-                // Find the closure for this frame
-                // The closure is at stack_[callee_stack_pos] in the saved stack
-                int closure_idx = sf.callee_stack_pos - caller_base;
-                if (closure_idx >= 0 && closure_idx < (int)fiber->saved_stack.size() && fiber->saved_stack[closure_idx].is_closure()) {
-                    f.closure = fiber->saved_stack[closure_idx].as_closure();
+                // sf.callee_stack_pos is already an offset from save_start (i.e., into saved_stack)
+                if (sf.callee_stack_pos >= 0 && sf.callee_stack_pos < (int)fiber->saved_stack.size() && fiber->saved_stack[sf.callee_stack_pos].is_closure()) {
+                    f.closure = fiber->saved_stack[sf.callee_stack_pos].as_closure();
                     f.ip = f.closure->function->bytecode.data() + sf.ip_offset;
                 }
             }
@@ -1937,13 +1935,13 @@ InterpretResult VM::run() {
                     for (int i = 0; i < fiber->saved_frame_count; i++) {
                         auto& sf = fiber->saved_frames[i];
                         auto& f = frames_[new_frame_base + i];
-                        f.base_register = sf.base_register;
+                        f.base_register = sf.base_register + caller_base;
                         f.return_register = sf.return_register;
-                        f.callee_stack_pos = sf.callee_stack_pos;
+                        f.callee_stack_pos = sf.callee_stack_pos + caller_base;
                         f.caller_stack_top = sf.caller_stack_top;
-                        int closure_idx = sf.callee_stack_pos - caller_base;
-                        if (closure_idx >= 0 && closure_idx < (int)fiber->saved_stack.size() && fiber->saved_stack[closure_idx].is_closure()) {
-                            f.closure = fiber->saved_stack[closure_idx].as_closure();
+                        // sf.callee_stack_pos is already an offset from save_start (i.e., into saved_stack)
+                        if (sf.callee_stack_pos >= 0 && sf.callee_stack_pos < (int)fiber->saved_stack.size() && fiber->saved_stack[sf.callee_stack_pos].is_closure()) {
+                            f.closure = fiber->saved_stack[sf.callee_stack_pos].as_closure();
                             f.ip = f.closure->function->bytecode.data() + sf.ip_offset;
                         }
                     }
