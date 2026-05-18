@@ -11,6 +11,21 @@
 
 namespace akar {
 
+// Safe double-to-int conversion (clamps to avoid UB)
+static int safe_int(double d) {
+    if (d != d) return 0; // NaN
+    if (d > 2147483647.0) return 2147483647;
+    if (d < -2147483648.0) return -2147483648;
+    return static_cast<int>(d);
+}
+
+static int64_t safe_int64(double d) {
+    if (d != d) return 0; // NaN
+    if (d > 9223372036854775807.0) return 9223372036854775807LL;
+    if (d < -9223372036854775808.0) return -9223372036854775807LL - 1;
+    return static_cast<int64_t>(d);
+}
+
 void register_native_function(VM& vm, const std::string& name, NativeFn fn) {
     vm.define_native(name, std::move(fn));
 }
@@ -23,7 +38,7 @@ template<> Value to_value<std::string>(std::string val) {
 }
 
 double value_to_double(Value v) { return v.is_number() ? v.get_number() : 0; }
-int value_to_int(Value v) { return v.is_number() ? static_cast<int>(v.get_number()) : 0; }
+int value_to_int(Value v) { return v.is_number() ? safe_int(v.get_number()) : 0; }
 bool value_to_bool(Value v) { return v.is_truthy(); }
 std::string value_to_string(Value v) { return v.to_string(); }
 
@@ -184,7 +199,7 @@ void register_builtins(VM& vm) {
     // sleep(ms) - sleeps for given milliseconds
     vm.define_native("sleep", [](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_number()) return Value();
-        int ms = static_cast<int>(argv[0].get_number());
+        int ms = safe_int(argv[0].get_number());
         if (ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         return Value();
     });
@@ -192,7 +207,7 @@ void register_builtins(VM& vm) {
     // int(x) - truncate to integer
     vm.define_native("int", [](int argc, Value* argv) -> Value {
         if (argc < 1) return Value(0.0);
-        if (argv[0].is_number()) return Value(static_cast<double>(static_cast<int64_t>(argv[0].get_number())));
+        if (argv[0].is_number()) return Value(static_cast<double>(safe_int64(argv[0].get_number())));
         if (argv[0].is_string()) {
             try { return Value(static_cast<double>(std::stoll(argv[0].as_string()->value))); }
             catch (...) { return Value(0.0); }
@@ -204,7 +219,7 @@ void register_builtins(VM& vm) {
     // char(code) - convert ASCII code to single-char string
     vm.define_native("char", [](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_number()) return Value();
-        char c = static_cast<char>(static_cast<int>(argv[0].get_number()));
+        char c = static_cast<char>(safe_int(argv[0].get_number()));
         std::string s(1, c);
         return Value(static_cast<Obj*>(get_string_table().intern(s)));
     });
@@ -248,7 +263,7 @@ void register_builtins(VM& vm) {
     // exit(code) - exit the program
     vm.define_native("exit", [](int argc, Value* argv) -> Value {
         int code = 0;
-        if (argc >= 1 && argv[0].is_number()) code = static_cast<int>(argv[0].get_number());
+        if (argc >= 1 && argv[0].is_number()) code = safe_int(argv[0].get_number());
         std::exit(code);
         return Value();
     });
@@ -349,8 +364,8 @@ void register_builtins(VM& vm) {
     vm.define_native("substr", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_string() || !argv[1].is_number()) return Value();
         auto& str = argv[0].as_string()->value;
-        int start = static_cast<int>(argv[1].get_number());
-        int len = (argc >= 3 && argv[2].is_number()) ? static_cast<int>(argv[2].get_number()) : static_cast<int>(str.size()) - start;
+        int start = safe_int(argv[1].get_number());
+        int len = (argc >= 3 && argv[2].is_number()) ? safe_int(argv[2].get_number()) : static_cast<int>(str.size()) - start;
         if (start < 0) start = 0;
         if (start >= static_cast<int>(str.size())) return Value(static_cast<Obj*>(get_string_table().intern("")));
         if (len < 0) len = 0;
@@ -361,11 +376,11 @@ void register_builtins(VM& vm) {
     vm.define_native("range", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_number() || !argv[1].is_number()) return Value();
         auto* arr = allocate_array();
-        int start = static_cast<int>(argv[0].get_number());
-        int end = static_cast<int>(argv[1].get_number());
+        int start = safe_int(argv[0].get_number());
+        int end = safe_int(argv[1].get_number());
         int step = 1;
         if (argc >= 3 && argv[2].is_number()) {
-            step = static_cast<int>(argv[2].get_number());
+            step = safe_int(argv[2].get_number());
             if (step == 0) step = 1;
         }
         if (step > 0) {
