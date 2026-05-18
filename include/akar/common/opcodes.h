@@ -96,22 +96,8 @@ enum class Opcode : uint8_t {
     GT_NUM,         // A = R[B] > R[C] (both known numbers)
     GTE_NUM,        // A = R[B] >= R[C] (both known numbers)
 
-    // Fused compare-and-branch (quickened from CMP + JMP_IF_FALSE)
-    // Format: [op] [cmp_A] [offset_hi] [offset_lo] - jumps if comparison result matches
-    // Fused compare-and-jump-if-true (order matches EQ,NEQ,LT,LTE,GT,GTE)
-    EQ_JMP,         // if R[B] == R[C] then skip offset bytes
-    NEQ_JMP,        // if R[B] != R[C] then skip offset bytes
-    LT_JMP,         // if R[B] < R[C] then skip offset bytes
-    LTE_JMP,        // if R[B] <= R[C] then skip offset bytes
-    GT_JMP,         // if R[B] > R[C] then skip offset bytes
-    GTE_JMP,        // if R[B] >= R[C] then skip offset bytes
-    // Fused compare-and-jump-if-false (order matches EQ,NEQ,LT,LTE,GT,GTE)
-    EQ_JMP_F,       // if !(R[B] == R[C]) then skip offset bytes
-    NEQ_JMP_F,      // if !(R[B] != R[C]) then skip offset bytes
-    LT_JMP_F,       // if !(R[B] < R[C]) then skip offset bytes
-    LTE_JMP_F,      // if !(R[B] <= R[C]) then skip offset bytes
-    GT_JMP_F,       // if !(R[B] > R[C]) then skip offset bytes
-    GTE_JMP_F,      // if !(R[B] >= R[C]) then skip offset bytes
+    // Compiler-emitted fused opcodes (reduce dispatch in hot loops)
+    MOD_EQ_ZERO,    // A = (R[B] % R[C] == 0) — fuses MOD + EQ + zero check into 1 opcode
 
     // Fiber/Coroutine
     FIBER_YIELD,    // yield R[A] from current fiber, resume value goes to R[A]

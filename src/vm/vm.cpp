@@ -237,8 +237,10 @@ InterpretResult VM::run() {
         // Quickened opcodes
         "ADD_NUM", "SUB_NUM", "MUL_NUM", "DIV_NUM", "MOD_NUM", "ADD_STR",
         "EQ_NUM", "NEQ_NUM", "LT_NUM", "LTE_NUM", "GT_NUM", "GTE_NUM",
-        "EQ_JMP", "NEQ_JMP", "LT_JMP", "LTE_JMP", "GT_JMP", "GTE_JMP",
-        "EQ_JMP_F", "NEQ_JMP_F", "LT_JMP_F", "LTE_JMP_F", "GT_JMP_F", "GTE_JMP_F",
+        "MOD_EQ_ZERO",
+        "FIBER_YIELD", "FIBER_RESUME", "TAIL_CALL",
+        "AWAIT", "THROW", "TRY_BEGIN", "TRY_END",
+        "WIDE",
     };
 
 #ifdef __GNUC__
@@ -259,10 +261,13 @@ InterpretResult VM::run() {
         // Quickened opcodes
         &&op_ADD_NUM, &&op_SUB_NUM, &&op_MUL_NUM, &&op_DIV_NUM, &&op_MOD_NUM, &&op_ADD_STR,
         &&op_EQ_NUM, &&op_NEQ_NUM, &&op_LT_NUM, &&op_LTE_NUM, &&op_GT_NUM, &&op_GTE_NUM,
-        &&op_EQ_JMP, &&op_NEQ_JMP, &&op_LT_JMP, &&op_LTE_JMP, &&op_GT_JMP, &&op_GTE_JMP,
-        &&op_EQ_JMP_F, &&op_NEQ_JMP_F, &&op_LT_JMP_F, &&op_LTE_JMP_F, &&op_GT_JMP_F, &&op_GTE_JMP_F,
-        &&op_FIBER_YIELD, &&op_FIBER_RESUME, &&op_TAIL_CALL,
-        &&op_AWAIT, &&op_THROW, &&op_TRY_BEGIN, &&op_TRY_END,
+        // Fused opcodes
+        &&op_MOD_EQ_ZERO,
+        // Fiber/coroutine
+        &&op_FIBER_YIELD, &&op_FIBER_RESUME,
+        // Tail call, await, exception
+        &&op_TAIL_CALL, &&op_AWAIT, &&op_THROW, &&op_TRY_BEGIN, &&op_TRY_END,
+        // Wide prefix
         &&op_WIDE,
     };
 
@@ -578,6 +583,11 @@ InterpretResult VM::run() {
         S(a) = Value(S(b).get_number() >= S(c).get_number());
         DISPATCH();
     }
+    CASE(MOD_EQ_ZERO): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        S(a) = Value(std::fmod(S(b).get_number(), S(c).get_number()) == 0.0);
+        DISPATCH();
+    }
     CASE(NOT): {
         uint8_t a = ip[1];
         uint8_t b = ip[2];
@@ -621,36 +631,6 @@ InterpretResult VM::run() {
         }
         DISPATCH();
     }
-    // Fused compare-and-jump-if-true handlers (order: EQ,NEQ,LT,LTE,GT,GTE)
-    #define FUSED_CMP_JMP_TRUE(name, cmp_op) \
-    CASE(name): { \
-        int8_t offset = static_cast<int8_t>(ip[1]); \
-        uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; \
-        if (S(b).get_number() cmp_op S(c).get_number()) ip += offset; \
-        DISPATCH(); \
-    }
-    FUSED_CMP_JMP_TRUE(EQ_JMP, ==)
-    FUSED_CMP_JMP_TRUE(NEQ_JMP, !=)
-    FUSED_CMP_JMP_TRUE(LT_JMP, <)
-    FUSED_CMP_JMP_TRUE(LTE_JMP, <=)
-    FUSED_CMP_JMP_TRUE(GT_JMP, >)
-    FUSED_CMP_JMP_TRUE(GTE_JMP, >=)
-    #undef FUSED_CMP_JMP_TRUE
-    // Fused compare-and-jump-if-false handlers (order: EQ,NEQ,LT,LTE,GT,GTE)
-    #define FUSED_CMP_JMP_FALSE(name, cmp_op) \
-    CASE(name): { \
-        int8_t offset = static_cast<int8_t>(ip[1]); \
-        uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; \
-        if (!(S(b).get_number() cmp_op S(c).get_number())) ip += offset; \
-        DISPATCH(); \
-    }
-    FUSED_CMP_JMP_FALSE(EQ_JMP_F, ==)
-    FUSED_CMP_JMP_FALSE(NEQ_JMP_F, !=)
-    FUSED_CMP_JMP_FALSE(LT_JMP_F, <)
-    FUSED_CMP_JMP_FALSE(LTE_JMP_F, <=)
-    FUSED_CMP_JMP_FALSE(GT_JMP_F, >)
-    FUSED_CMP_JMP_FALSE(GTE_JMP_F, >=)
-    #undef FUSED_CMP_JMP_FALSE
     CASE(CALL): {
         call_a = ip[1];
         call_b = ip[2];

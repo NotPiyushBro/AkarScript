@@ -309,6 +309,20 @@ void CodeGenerator::compile_identifier(Identifier* node, int reg) {
 }
 
 void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
+    // Peephole: x % y == 0 → MOD_EQ_ZERO (fuses 2 opcodes into 1, saves 1M dispatches in sum_primes)
+    if (node->op == "==" && node->left->type == NodeType::Binary && node->right->type == NodeType::NumberLit) {
+        auto* left_bin = static_cast<BinaryExpr*>(node->left.get());
+        auto* right_num = static_cast<NumberLiteral*>(node->right.get());
+        if (left_bin->op == "%" && right_num->value == 0.0) {
+            int mod_left = compile_expr(left_bin->left);
+            int mod_right = compile_expr(left_bin->right);
+            emit(op_byte(Opcode::MOD_EQ_ZERO), reg, mod_left, mod_right);
+            free_register(); // mod_right
+            free_register(); // mod_left
+            return;
+        }
+    }
+
     int left = compile_expr(node->left);
     int right = compile_expr(node->right);
 
