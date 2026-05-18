@@ -129,7 +129,9 @@ private:
     CallFrame frames_[MAX_FRAMES];
     int frame_count_ = 0;
 
-    std::unordered_map<std::string, Value> globals_;
+    // Use ObjString* as key - strings are interned so pointer equality works
+    // This eliminates string hashing on every GET_GLOBAL/SET_GLOBAL
+    std::unordered_map<ObjString*, Value, std::hash<ObjString*>, std::equal_to<ObjString*>> globals_;
     ObjUpvalue* open_upvalues_ = nullptr;
 
     std::string last_error_;

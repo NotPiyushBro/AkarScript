@@ -46,6 +46,7 @@ void VM::mark_roots() {
     }
     // Mark globals
     for (auto& [name, val] : globals_) {
+        gc_mark_object(static_cast<Obj*>(name)); // mark the key (ObjString*) too
         gc_mark_value(val);
     }
     // Mark closures in call frames
@@ -266,8 +267,6 @@ InterpretResult VM::run() {
     };
 
     #define DISPATCH() do { \
-        if (yield_pending_) HANDLE_FIBER_YIELD(); \
-        CHECK_MEMORY_LIMIT(); \
         goto *dispatch_table[ip[0]]; \
     } while(0)
     #define DISPATCH_VERBOSE() do { \
@@ -358,7 +357,7 @@ InterpretResult VM::run() {
             RETURN_RUNTIME_ERROR;
         }
         ObjString* name = constants[bx].as_string();
-        auto it = globals_.find(name->value);
+        auto it = globals_.find(name);
         if (it == globals_.end()) {
             runtime_error("Undefined variable '%s'", name->value.c_str());
             RETURN_RUNTIME_ERROR;
@@ -376,7 +375,7 @@ InterpretResult VM::run() {
             RETURN_RUNTIME_ERROR;
         }
         ObjString* name = constants[bx].as_string();
-        globals_[name->value] = S(a);
+        globals_[name] = S(a);
         DISPATCH();
     }
     CASE(ADD): {
@@ -590,6 +589,10 @@ InterpretResult VM::run() {
         uint16_t bx = (ip[2] << 8) | ip[3];
         int16_t offset = static_cast<int16_t>(bx);
         ip += offset;
+        if (offset < 0) { // backward jump = loop back-edge
+            CHECK_MEMORY_LIMIT();
+            if (yield_pending_) HANDLE_FIBER_YIELD();
+        }
         DISPATCH();
     }
     CASE(JMP_IF_FALSE): {
@@ -1553,7 +1556,7 @@ InterpretResult VM::run() {
                     RETURN_RUNTIME_ERROR;
                 }
                 ObjString* name = constants[bx].as_string();
-                auto it = globals_.find(name->value);
+                auto it = globals_.find(name);
                 if (it == globals_.end()) {
                     runtime_error("Undefined variable '%s'", name->value.c_str());
                     RETURN_RUNTIME_ERROR;
@@ -1569,7 +1572,7 @@ InterpretResult VM::run() {
                     RETURN_RUNTIME_ERROR;
                 }
                 ObjString* name = constants[bx].as_string();
-                globals_[name->value] = S(wa);
+                globals_[name] = S(wa);
                 break;
             }
             case Opcode::SET_LOCAL: stack_[frame->base_register + wb] = S(wa); break;
@@ -2412,18 +2415,22 @@ void VM::runtime_error(const char* format, ...) {
 
 void VM::define_native(const std::string& name, NativeFn function) {
     auto* native = allocate_native(function, name);
-    globals_[name] = Value(static_cast<Obj*>(native));
+    ObjString* key = get_string_table().intern(name);
+    globals_[key] = Value(static_cast<Obj*>(native));
     // Also register with hashed name so release .ako files can find it
     auto* native2 = allocate_native(std::move(function), name);
-    globals_[akar_hash_symbol(name)] = Value(static_cast<Obj*>(native2));
+    ObjString* hash_key = get_string_table().intern(akar_hash_symbol(name));
+    globals_[hash_key] = Value(static_cast<Obj*>(native2));
 }
 
 void VM::set_global(const std::string& name, Value value) {
-    globals_[name] = value;
+    ObjString* key = get_string_table().intern(name);
+    globals_[key] = value;
 }
 
 Value VM::get_global(const std::string& name) const {
-    auto it = globals_.find(name);
+    ObjString* key = get_string_table().intern(name);
+    auto it = globals_.find(key);
     if (it != globals_.end()) return it->second;
     return Value();
 }
