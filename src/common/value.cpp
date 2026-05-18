@@ -337,7 +337,7 @@ std::string Value::to_string() const {
     if (is_number()) {
         double d;
         std::memcpy(&d, &bits, 8);
-        if (std::floor(d) == d && std::abs(d) < 1e15) {
+        if (std::floor(d) == d && std::abs(d) < 1e16) {
             return std::to_string(static_cast<int64_t>(d));
         }
         std::ostringstream ss;

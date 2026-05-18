@@ -510,6 +510,7 @@ void CodeGenerator::compile_block(BlockStmt* node) {
 void CodeGenerator::compile_if(IfStmt* node) {
     int cond = compile_expr(node->condition);
     size_t then_jump = emit_jump(op_byte(Opcode::JMP_IF_FALSE), cond, 0);
+    free_register(); // cond — only read by JMP_IF_FALSE
 
     compile_stmt(node->then_branch);
     if (node->else_branch) {
@@ -527,6 +528,7 @@ void CodeGenerator::compile_while(WhileStmt* node) {
     size_t loop_start = current_offset();
     int cond = compile_expr(node->condition);
     size_t exit_jump = emit_jump(op_byte(Opcode::JMP_IF_FALSE), cond, 0);
+    free_register(); // cond — only read by JMP_IF_FALSE
 
     // Save break/continue targets
     auto& breaks = current_scope_->break_jumps;
@@ -567,6 +569,7 @@ void CodeGenerator::compile_for(ForStmt* node) {
     if (node->cond) {
         int cond = compile_expr(node->cond);
         exit_jump = emit_jump(op_byte(Opcode::JMP_IF_FALSE), cond, 0);
+        free_register(); // cond — only read by JMP_IF_FALSE
     }
 
     auto& breaks = current_scope_->break_jumps;

@@ -488,7 +488,7 @@ InterpretResult VM::run() {
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value < rc.as_string()->value);
         } else {
-            runtime_error("Operands must be numbers or strings");
+            runtime_error("Operands must be two numbers or two strings");
             RETURN_RUNTIME_ERROR;
         }
         DISPATCH();
@@ -505,7 +505,7 @@ InterpretResult VM::run() {
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value <= rc.as_string()->value);
         } else {
-            runtime_error("Operands must be numbers or strings");
+            runtime_error("Operands must be two numbers or two strings");
             RETURN_RUNTIME_ERROR;
         }
         DISPATCH();
@@ -522,7 +522,7 @@ InterpretResult VM::run() {
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value > rc.as_string()->value);
         } else {
-            runtime_error("Operands must be numbers or strings");
+            runtime_error("Operands must be two numbers or two strings");
             RETURN_RUNTIME_ERROR;
         }
         DISPATCH();
@@ -539,7 +539,7 @@ InterpretResult VM::run() {
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value >= rc.as_string()->value);
         } else {
-            runtime_error("Operands must be numbers or strings");
+            runtime_error("Operands must be two numbers or two strings");
             RETURN_RUNTIME_ERROR;
         }
         DISPATCH();

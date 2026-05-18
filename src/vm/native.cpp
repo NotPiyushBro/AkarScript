@@ -59,7 +59,7 @@ void register_builtins(VM& vm) {
         if (argv[0].is_string()) return Value(static_cast<double>(argv[0].as_string()->value.size()));
         if (argv[0].is_array()) return Value(static_cast<double>(argv[0].as_array()->elements.size()));
         if (argv[0].is_map()) return Value(static_cast<double>(argv[0].as_map()->entries.size()));
-        return Value(0.0);
+        return Value(); // nil for unsupported types
     });
 
     // type(value)
