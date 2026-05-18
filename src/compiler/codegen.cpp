@@ -326,6 +326,8 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
     else throw std::runtime_error("Unknown binary operator: " + node->op);
 
     emit(op_byte(op), reg, left, right);
+    free_register(); // right
+    free_register(); // left
 }
 
 void CodeGenerator::compile_unary(UnaryExpr* node, int reg) {
@@ -335,23 +337,27 @@ void CodeGenerator::compile_unary(UnaryExpr* node, int reg) {
     } else if (node->op == "!" || node->op == "not") {
         emit(op_byte(Opcode::NOT), reg, operand, 0);
     }
+    free_register(); // operand
 }
 
 void CodeGenerator::compile_logical(LogicalExpr* node, int reg) {
     if (node->op == "and") {
-        // Short-circuit: if left is false, result = left; else result = right
         int left = compile_expr(node->left);
         emit(op_byte(Opcode::MOVE), reg, left, 0);
+        free_register(); // left
         size_t jump = emit_jump(op_byte(Opcode::JMP_IF_FALSE), reg, 0);
         int right = compile_expr(node->right);
         emit(op_byte(Opcode::MOVE), reg, right, 0);
+        free_register(); // right
         patch_jump(jump, static_cast<int16_t>(current_offset() - jump - INST_SIZE));
     } else { // "or"
         int left = compile_expr(node->left);
         emit(op_byte(Opcode::MOVE), reg, left, 0);
+        free_register(); // left
         size_t jump = emit_jump(op_byte(Opcode::JMP_IF_TRUE), reg, 0);
         int right = compile_expr(node->right);
         emit(op_byte(Opcode::MOVE), reg, right, 0);
+        free_register(); // right
         patch_jump(jump, static_cast<int16_t>(current_offset() - jump - INST_SIZE));
     }
 }
@@ -430,12 +436,15 @@ void CodeGenerator::compile_index(IndexExpr* node, int reg) {
     int obj = compile_expr(node->object);
     int idx = compile_expr(node->index);
     emit(op_byte(Opcode::GET_INDEX), reg, obj, idx);
+    free_register(); // idx
+    free_register(); // obj
 }
 
 void CodeGenerator::compile_field_access(FieldAccessExpr* node, int reg) {
     int obj = compile_expr(node->object);
     uint16_t field_const = make_identifier_constant(node->field);
     emit(op_byte(Opcode::GET_FIELD), reg, obj, field_const);
+    free_register(); // obj
 }
 
 void CodeGenerator::compile_field_set(FieldSetExpr* node, int reg) {
@@ -444,6 +453,8 @@ void CodeGenerator::compile_field_set(FieldSetExpr* node, int reg) {
     uint16_t field_const = make_identifier_constant(node->field);
     emit(op_byte(Opcode::SET_FIELD), obj, field_const, val);
     emit(op_byte(Opcode::MOVE), reg, val, 0);
+    free_register(); // val
+    free_register(); // obj
 }
 
 void CodeGenerator::compile_assignment(AssignmentExpr* node, int reg) {
@@ -452,17 +463,20 @@ void CodeGenerator::compile_assignment(AssignmentExpr* node, int reg) {
     if (local >= 0) {
         emit(op_byte(Opcode::MOVE), local, val, 0);
         emit(op_byte(Opcode::MOVE), reg, val, 0);
+        free_register(); // val
         return;
     }
     int upvalue = resolve_upvalue(node->name);
     if (upvalue >= 0) {
         emit(op_byte(Opcode::SET_UPVALUE), val, upvalue, 0);
         emit(op_byte(Opcode::MOVE), reg, val, 0);
+        free_register(); // val
         return;
     }
     uint16_t name_const = make_identifier_constant(node->name);
     emit_bx(op_byte(Opcode::SET_GLOBAL), val, name_const);
     emit(op_byte(Opcode::MOVE), reg, val, 0);
+    free_register(); // val
 }
 
 void CodeGenerator::compile_array_index_set(ArrayIndexSetExpr* node, int reg) {
@@ -471,12 +485,17 @@ void CodeGenerator::compile_array_index_set(ArrayIndexSetExpr* node, int reg) {
     int val = compile_expr(node->value);
     emit(op_byte(Opcode::SET_INDEX), obj, idx, val);
     emit(op_byte(Opcode::MOVE), reg, val, 0);
+    free_register(); // val
+    free_register(); // idx
+    free_register(); // obj
 }
 
 void CodeGenerator::compile_range(RangeExpr* node, int reg) {
     int start = compile_expr(node->start);
     int end = compile_expr(node->end);
     emit(op_byte(Opcode::NEW_RANGE), reg, start, end);
+    free_register(); // end
+    free_register(); // start
 }
 
 void CodeGenerator::compile_this(ThisExpr*, int reg) {
