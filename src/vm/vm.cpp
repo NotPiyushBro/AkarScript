@@ -743,7 +743,7 @@ InterpretResult VM::run() {
             S(a) = instance_val;
             auto& methods = callee.as_class()->methods;
             auto init_it = methods.find("init");
-            if (init_it == methods.end()) init_it = methods.find(akar_hash_symbol("init"));
+            if (init_it == methods.end()) init_it = methods.find(HASH_INIT);
             if (init_it != methods.end() && init_it->second.is_closure()) {
                 auto* init_closure = init_it->second.as_closure();
                 int total_args = arg_count + 1;
@@ -820,7 +820,7 @@ InterpretResult VM::run() {
             stack_[callee_abs] = instance_val;
             auto& methods = callee.as_class()->methods;
             auto init_it = methods.find("init");
-            if (init_it == methods.end()) init_it = methods.find(akar_hash_symbol("init"));
+            if (init_it == methods.end()) init_it = methods.find(HASH_INIT);
             if (init_it != methods.end() && init_it->second.is_closure()) {
                 auto* init_closure = init_it->second.as_closure();
                 int total_args = arg_count + 1;
@@ -1127,13 +1127,13 @@ InterpretResult VM::run() {
             auto it = obj.as_map()->entries.find(field);
             S(a) = (it != obj.as_map()->entries.end()) ? it->second : Value();
         } else if (obj.is_string()) {
-            if (field == "length" || field == akar_hash_symbol("length")) {
+            if (field == "length" || field == HASH_LENGTH) {
                 S(a) = Value(static_cast<double>(obj.as_string()->value.size()));
             } else {
                 S(a) = Value();
             }
         } else if (obj.is_array()) {
-            if (field == "length" || field == akar_hash_symbol("length")) {
+            if (field == "length" || field == HASH_LENGTH) {
                 S(a) = Value(static_cast<double>(obj.as_array()->elements.size()));
             } else {
                 S(a) = Value();
@@ -1705,13 +1705,13 @@ InterpretResult VM::run() {
                     auto it = obj.as_map()->entries.find(field);
                     S(wa) = (it != obj.as_map()->entries.end()) ? it->second : Value();
                 } else if (obj.is_string()) {
-                    if (field == "length" || field == akar_hash_symbol("length")) {
+                    if (field == "length" || field == HASH_LENGTH) {
                         S(wa) = Value(static_cast<double>(obj.as_string()->value.size()));
                     } else {
                         S(wa) = Value();
                     }
                 } else if (obj.is_array()) {
-                    if (field == "length" || field == akar_hash_symbol("length")) {
+                    if (field == "length" || field == HASH_LENGTH) {
                         S(wa) = Value(static_cast<double>(obj.as_array()->elements.size()));
                     } else {
                         S(wa) = Value();

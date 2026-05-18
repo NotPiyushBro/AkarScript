@@ -2,6 +2,7 @@
 #include "akar/common/value.h"
 #include "akar/common/opcodes.h"
 #include "akar/vm/native.h"
+#include "akar/vm/object_file.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -103,6 +104,10 @@ private:
 
     // Constants from current frame
     Value read_constant(int index);
+
+    // Cached hash symbols for common field names (avoid recomputing on every access)
+    static inline const std::string HASH_LENGTH = akar_hash_symbol("length");
+    static inline const std::string HASH_INIT = akar_hash_symbol("init");
 
     // Stack
     static constexpr int MAX_STACK = 256 * 256;
