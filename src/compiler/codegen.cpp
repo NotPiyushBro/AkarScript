@@ -11,6 +11,7 @@ namespace akar {
 CodeGenerator::CodeGenerator() {}
 
 ObjFunction* CodeGenerator::compile(const ASTPtr& ast) {
+    visited_files_.clear();
     auto* func = allocate_function();
     func->name = "<script>";
     func->register_count = 0;

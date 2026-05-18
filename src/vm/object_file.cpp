@@ -158,6 +158,11 @@ static void serialize_value(std::vector<uint8_t>& data, const Value& val,
             // Bytecode
             write_u32(data, func->bytecode.size());
             data.insert(data.end(), func->bytecode.begin(), func->bytecode.end());
+        } else {
+            // Unsupported object type (array, map, closure, class, etc.)
+            // Write nil sub-tag to keep stream consistent
+            data.pop_back(); // remove the OBJ tag we already wrote
+            write_u8(data, 0); // Nil tag
         }
     }
 }
