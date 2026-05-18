@@ -796,6 +796,7 @@ void CodeGenerator::compile_class(ClassStmt* node) {
     if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
         uint16_t name_const2 = make_identifier_constant(node->name);
         emit_bx(op_byte(Opcode::SET_GLOBAL), class_reg, name_const2);
+        free_register(); // class_reg no longer needed for global path
     } else {
         declare_local(node->name, class_reg);
     }
