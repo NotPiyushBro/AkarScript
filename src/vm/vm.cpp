@@ -163,6 +163,8 @@ InterpretResult VM::run() {
     #define HANDLE_FIBER_YIELD() do { \
         if (yield_pending_ && active_fiber_) { \
             ObjFiber* fib = active_fiber_; \
+            /* Sync frame->ip with the local ip before saving state */ \
+            frame->ip = ip; \
             int save_start = frames_[fib->frame_base].callee_stack_pos; \
             fib->saved_stack.clear(); \
             for (int _i = save_start; _i < stack_top_; _i++) { \
@@ -490,12 +492,7 @@ InterpretResult VM::run() {
     CASE(EQ): {
         uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
         Value& rb = S(b); Value& rc = S(c);
-        if (rb.is_number() && rc.is_number()) {
-            S(a) = Value(rb.get_number() == rc.get_number());
-            *(ip - 4) = op_byte(Opcode::EQ_NUM);
-        } else {
-            S(a) = Value(rb == rc);
-        }
+        S(a) = Value(rb == rc);
         DISPATCH();
     }
     CASE(EQ_NUM): {
@@ -506,12 +503,7 @@ InterpretResult VM::run() {
     CASE(NEQ): {
         uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
         Value& rb = S(b); Value& rc = S(c);
-        if (rb.is_number() && rc.is_number()) {
-            S(a) = Value(rb.get_number() != rc.get_number());
-            *(ip - 4) = op_byte(Opcode::NEQ_NUM);
-        } else {
-            S(a) = Value(rb != rc);
-        }
+        S(a) = Value(rb != rc);
         DISPATCH();
     }
     CASE(NEQ_NUM): {
@@ -524,7 +516,6 @@ InterpretResult VM::run() {
         Value& rb = S(b); Value& rc = S(c);
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() < rc.get_number());
-            *(ip - 4) = op_byte(Opcode::LT_NUM);
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value < rc.as_string()->value);
         } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
@@ -540,7 +531,6 @@ InterpretResult VM::run() {
         Value& rb = S(b); Value& rc = S(c);
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() <= rc.get_number());
-            *(ip - 4) = op_byte(Opcode::LTE_NUM);
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value <= rc.as_string()->value);
         } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
@@ -556,7 +546,6 @@ InterpretResult VM::run() {
         Value& rb = S(b); Value& rc = S(c);
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() > rc.get_number());
-            *(ip - 4) = op_byte(Opcode::GT_NUM);
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value > rc.as_string()->value);
         } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
@@ -572,7 +561,6 @@ InterpretResult VM::run() {
         Value& rb = S(b); Value& rc = S(c);
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() >= rc.get_number());
-            *(ip - 4) = op_byte(Opcode::GTE_NUM);
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value >= rc.as_string()->value);
         } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
@@ -689,6 +677,8 @@ InterpretResult VM::run() {
                 // Get the yield value from the first argument
                 Value yval = (arg_count >= 1) ? stack_[callee_abs + 1] : Value();
                 VLOG("[FIBER_YIELD] value=%s a=%d base=%d stack_top=%d frames=%d frame_base=%d\n", yval.to_string().c_str(), a, base, stack_top_, frame_count_, fib->frame_base);
+                // Sync frame->ip with the local ip before saving state
+                frame->ip = ip;
                 // Save the fiber's own stack and frames (from the fiber's entry callee position)
                 int save_start = frames_[fib->frame_base].callee_stack_pos;
                 fib->saved_stack.clear();
@@ -737,6 +727,8 @@ InterpretResult VM::run() {
             // Check for deferred fiber resume (set by native fiber_resume)
             if (resume_pending_) {
                 resume_pending_ = false;
+                // Save caller's IP before switching to fiber frame
+                frame->ip = ip;
                 ObjFiber* fib = resume_fiber_;
                 resume_fiber_ = nullptr;
                 resume_return_reg_ = a; // save the return register from the CALL instruction
@@ -1952,6 +1944,8 @@ InterpretResult VM::run() {
                 break;
             }
             case Opcode::FIBER_RESUME: {
+                // Save caller's IP before switching to fiber frame
+                frame->ip = ip;
                 Value fiber_val = S(wb);
                 Value resume_val = S(wc);
                 if (!fiber_val.is_fiber()) {

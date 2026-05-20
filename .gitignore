@@ -28,3 +28,4 @@ cmake-build-*/
 *.so
 *.dylib
 *.exe
+*.ako

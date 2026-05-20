@@ -175,6 +175,9 @@ int CodeGenerator::compile_expr(const ASTPtr& node) {
         case NodeType::FieldAccess:
             compile_field_access(static_cast<FieldAccessExpr*>(node.get()), reg);
             break;
+        case NodeType::SuperAccess:
+            compile_super(static_cast<SuperAccessExpr*>(node.get()), reg);
+            break;
         case NodeType::Range:
             compile_range(static_cast<RangeExpr*>(node.get()), reg);
             break;
@@ -402,15 +405,9 @@ void CodeGenerator::compile_call(CallExpr* node, int reg) {
         if (callee != reg) {
             emit(op_byte(Opcode::MOVE), reg, callee, 0);
         }
-        // Free callee register
-        free_register();
-        // Free arg registers that are temporaries (above callee+1)
-        for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
-            int target = callee + 1 + i;
-            if (arg_regs[i] >= callee + 1 && arg_regs[i] != target) {
-                free_register();
-            }
-        }
+        // Free all temporary registers used for callee and args.
+        // After the CALL, only `reg` (the result) needs to survive.
+        current_scope_->next_register = reg + 1;
     } else {
         int callee = compile_expr(node->callee);
         std::vector<int> arg_regs;
@@ -434,16 +431,9 @@ void CodeGenerator::compile_call(CallExpr* node, int reg) {
         if (call_callee != reg) {
             emit(op_byte(Opcode::MOVE), reg, call_callee, 0);
         }
-        if (used_temp_callee) {
-            free_register();
-        }
-        // Free arg registers that are temporaries
-        for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
-            int target = call_callee + 1 + i;
-            if (arg_regs[i] >= call_callee + 1 && arg_regs[i] != target) {
-                free_register();
-            }
-        }
+        // Free all temporary registers used for callee and args.
+        // After the CALL, only `reg` (the result) needs to survive.
+        current_scope_->next_register = reg + 1;
     }
 }
 
