@@ -113,6 +113,9 @@ private:
     uint16_t make_constant(Value value);
     uint16_t make_identifier_constant(const std::string& name);
 
+    // Peephole optimization
+    void peephole_optimize(std::vector<uint8_t>& bytecode);
+
     CompilerScope* current_scope_ = nullptr;
     std::unordered_map<std::string, Value> global_names_;
     int string_counter_ = 0;

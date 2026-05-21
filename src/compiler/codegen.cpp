@@ -125,6 +125,8 @@ ObjFunction* CodeGenerator::compile_function(const std::string& name, const std:
     }
 
     func->register_count = scope.max_registers;
+    // Peephole optimize the bytecode
+    peephole_optimize(func->bytecode);
     // Store upvalue descriptors
     for (auto& uv : scope.upvalues) {
         func->upvalue_descs.push_back({uv.index, uv.is_local});
@@ -1501,6 +1503,136 @@ void CodeGenerator::compile_enum(EnumStmt* node) {
     } else {
         declare_local(node->name, class_reg);
     }
+}
+
+// Returns the destination register (A operand) for an opcode, or -1 if it doesn't write to A.
+static int opcode_dest_reg(uint8_t op) {
+    // Opcodes that write to register A
+    switch (static_cast<Opcode>(op)) {
+        case Opcode::LOAD_CONST: case Opcode::LOAD_NIL: case Opcode::LOAD_TRUE:
+        case Opcode::LOAD_FALSE: case Opcode::MOVE: case Opcode::GET_LOCAL:
+        case Opcode::GET_UPVALUE: case Opcode::GET_GLOBAL:
+        case Opcode::ADD: case Opcode::SUB: case Opcode::MUL: case Opcode::DIV:
+        case Opcode::MOD: case Opcode::NEG:
+        case Opcode::EQ: case Opcode::NEQ: case Opcode::LT: case Opcode::LTE:
+        case Opcode::GT: case Opcode::GTE: case Opcode::NOT:
+        case Opcode::CALL: case Opcode::CLOSURE: case Opcode::NEW_ARRAY:
+        case Opcode::NEW_MAP: case Opcode::GET_INDEX: case Opcode::GET_FIELD:
+        case Opcode::NEW_CLASS: case Opcode::NEW_INSTANCE: case Opcode::GET_METHOD:
+        case Opcode::NEW_RANGE: case Opcode::ITER_INIT: case Opcode::ITER_NEXT:
+        case Opcode::ITER_DONE:
+        case Opcode::ADD_NUM: case Opcode::SUB_NUM: case Opcode::MUL_NUM:
+        case Opcode::DIV_NUM: case Opcode::MOD_NUM: case Opcode::ADD_STR:
+        case Opcode::EQ_NUM: case Opcode::NEQ_NUM: case Opcode::LT_NUM:
+        case Opcode::LTE_NUM: case Opcode::GT_NUM: case Opcode::GTE_NUM:
+        case Opcode::MOD_EQ_ZERO:
+        case Opcode::SIGNAL_CREATE: case Opcode::SIGNAL_GET:
+        case Opcode::EFFECT_CREATE:
+        case Opcode::ENUM_CREATE: case Opcode::ENUM_GET: case Opcode::ENUM_IS:
+            return 0; // A is destination
+        default:
+            return -1; // doesn't write to A, or is a control flow op
+    }
+}
+
+// Returns the set of source registers that an opcode reads from.
+// Returns a bitmask: bit 0 = reads A, bit 1 = reads B, bit 2 = reads C.
+static int opcode_src_regs(uint8_t op) {
+    switch (static_cast<Opcode>(op)) {
+        case Opcode::MOVE: return 2; // reads B only
+        case Opcode::NEG: case Opcode::NOT:
+        case Opcode::SIGNAL_GET: case Opcode::SIGNAL_CREATE:
+        case Opcode::ITER_INIT: case Opcode::ITER_DONE:
+        case Opcode::GET_UPVALUE: case Opcode::EFFECT_CREATE:
+        case Opcode::NEW_INSTANCE:
+            return 2; // reads B only
+        case Opcode::SET_LOCAL: case Opcode::SET_UPVALUE: case Opcode::SET_GLOBAL:
+        case Opcode::PRINT: case Opcode::RETURN:
+        case Opcode::CLOSE_UPVALUE: case Opcode::THROW: case Opcode::AWAIT:
+        case Opcode::JMP_IF_FALSE: case Opcode::JMP_IF_TRUE:
+        case Opcode::FIBER_YIELD: case Opcode::EFFECT_RUN:
+            return 1; // reads A only
+        case Opcode::SIGNAL_SET:
+            return 3; // reads A and B
+        case Opcode::SET_FIELD:
+            return 5; // reads A and C (B is constant index)
+        case Opcode::ADD: case Opcode::SUB: case Opcode::MUL: case Opcode::DIV:
+        case Opcode::MOD: case Opcode::EQ: case Opcode::NEQ:
+        case Opcode::LT: case Opcode::LTE: case Opcode::GT: case Opcode::GTE:
+        case Opcode::NEW_RANGE:
+        case Opcode::ADD_NUM: case Opcode::SUB_NUM: case Opcode::MUL_NUM:
+        case Opcode::DIV_NUM: case Opcode::MOD_NUM: case Opcode::ADD_STR:
+        case Opcode::EQ_NUM: case Opcode::NEQ_NUM: case Opcode::LT_NUM:
+        case Opcode::LTE_NUM: case Opcode::GT_NUM: case Opcode::GTE_NUM:
+        case Opcode::MOD_EQ_ZERO:
+        case Opcode::GET_FIELD: case Opcode::GET_INDEX: case Opcode::GET_METHOD:
+        case Opcode::FIBER_RESUME: case Opcode::ENUM_IS:
+            return 6; // reads B and C
+        case Opcode::SET_INDEX:
+            return 7; // reads A (object), B (index), and C (value)
+        case Opcode::ENUM_VARIANT: case Opcode::ENUM_DATA_VARIANT:
+            return 1; // reads A (class register)
+        default:
+            return 0;
+    }
+}
+
+void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
+    size_t len = bytecode.size();
+
+    // Pass 1: Dead MOVE elimination (forward scan)
+    // A MOVE A, B is dead if A is overwritten before being read,
+    // scanning forward until we hit a JMP or find a read of A.
+    for (size_t i = 0; i + 4 <= len; i += 4) {
+        uint8_t op = bytecode[i];
+        if (op != op_byte(Opcode::MOVE)) continue;
+        uint8_t move_dest = bytecode[i + 1]; // A operand
+
+        // Scan forward from the next instruction
+        bool dead = false;
+        for (size_t j = i + 4; j + 4 <= len; j += 4) {
+            uint8_t scan_op = bytecode[j];
+            if (scan_op == op_byte(Opcode::WIDE)) break; // can't analyze wide
+            // Control flow — can't determine, keep MOVE for safety
+            if (scan_op == op_byte(Opcode::JMP) ||
+                scan_op == op_byte(Opcode::JMP_IF_FALSE) ||
+                scan_op == op_byte(Opcode::JMP_IF_TRUE) ||
+                scan_op == op_byte(Opcode::RETURN) ||
+                scan_op == op_byte(Opcode::HALT) ||
+                scan_op == op_byte(Opcode::CALL) ||
+                scan_op == op_byte(Opcode::TAIL_CALL)) {
+                break;
+            }
+
+            int dest = opcode_dest_reg(scan_op);
+            int srcs = opcode_src_regs(scan_op);
+
+            // Check if this instruction reads the MOVE destination (A, B, or C)
+            if (srcs & 1) {
+                if (bytecode[j + 1] == move_dest) break; // reads A
+            }
+            if (srcs & 2) {
+                if (bytecode[j + 2] == move_dest) break; // reads B
+            }
+            if (srcs & 4) {
+                if (bytecode[j + 3] == move_dest) break; // reads C
+            }
+
+            // Check if this instruction overwrites the MOVE destination
+            if (dest >= 0 && bytecode[j + 1 + dest] == move_dest) {
+                dead = true; // overwritten before being read — MOVE is dead
+                break;
+            }
+        }
+
+        if (dead) {
+            bytecode[i] = op_byte(Opcode::NOP);
+        }
+    }
+
+    // Pass 2: NOP compaction disabled — jump offset adjustment is complex
+    // Dead MOVEs are replaced with NOPs which still dispatch but are very fast
+    // (NOP handler just increments IP)
 }
 
 } // namespace akar
