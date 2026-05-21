@@ -4,6 +4,7 @@
 #include "akar/vm/native.h"
 #include "akar/vm/object_file.h"
 #include "akar/vm/profiler.h"
+#include "akar/vm/jit.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <deque>
@@ -156,6 +157,10 @@ private:
     ObjUpvalue* open_upvalues_ = nullptr;
 
     std::string last_error_;
+
+    // JIT compiler
+    JITCache jit_cache_;
+    bool jit_enabled_ = true;
 
     // VM registration for GC (tracks all live VMs so GC marks from all roots)
     static std::unordered_set<VM*> active_vms_;

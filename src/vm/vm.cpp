@@ -827,6 +827,66 @@ InterpretResult VM::run() {
             // Inline fast path: non-varargs, correct arity
             if (frame_count_ >= MAX_FRAMES) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
             int fixed_arity = closure->function->arity;
+
+            // JIT: track calls and attempt compilation for hot functions
+            if (jit_enabled_ && !closure->function->has_varargs && arg_count == fixed_arity) {
+                ObjFunction* func = closure->function;
+                jit_cache_.record_call(func);
+
+                // Check if we already have JIT code
+                auto jit_it = jit_cache_.compiled.find(func);
+                if (jit_it != jit_cache_.compiled.end()) {
+                    // Execute JIT'd native code
+                    JITCode* jit_code = jit_it->second;
+                    int args_abs = callee_abs + 1;
+
+                    // Set up the call frame (interpreter needs it for RETURN handling)
+                    frame->ip = ip;
+                    CallFrame* new_frame = &frames_[frame_count_++];
+                    new_frame->closure = closure;
+                    new_frame->ip = func->bytecode.data();
+                    new_frame->base_register = args_abs;
+                    new_frame->return_register = a;
+                    new_frame->callee_stack_pos = callee_abs;
+                    new_frame->caller_stack_top = stack_top_;
+                    new_frame->slots = &stack_[args_abs];
+                    int needed = func->register_count;
+                    static constexpr uint64_t NIL_BITS_JIT = 0x7FFC000000000000ULL;
+                    for (int i = arg_count; i < needed; i++) {
+                        stack_[args_abs + i].bits = NIL_BITS_JIT;
+                    }
+                    int new_top = args_abs + needed;
+                    if (new_top > stack_top_) stack_top_ = new_top;
+                    frame = new_frame;
+                    base = args_abs;
+                    ip = new_frame->ip;
+
+                    // Call the JIT code
+                    int jit_pc = 0;
+                    JITResult result = jit_code->entry(stack_, args_abs, &jit_pc,
+                                                        func->constants.data());
+
+                    if (result == JITResult::Bailout) {
+                        // JIT bailed — continue interpreting from jit_pc
+                        ip = func->bytecode.data() + jit_pc;
+                        // frame, base already set up correctly
+                        DISPATCH();
+                    }
+                    // JITResult::Done — function completed (shouldn't happen with baseline JIT
+                    // since we bail on RETURN, but handle gracefully)
+                    DISPATCH();
+                }
+
+                // Check if it's time to JIT compile
+                if (jit_cache_.call_counts[func] >= JITCache::JIT_THRESHOLD) {
+                    JITCode* jit_code = jit_cache_.compiler.compile(func);
+                    if (jit_code) {
+                        jit_cache_.compiled[func] = jit_code;
+                        // The JIT will be used on the NEXT call to this function
+                    }
+                }
+            }
+
             if (closure->function->has_varargs || arg_count != fixed_arity) {
                 frame->ip = ip; if (!call(closure, arg_count, a, callee_abs)) { RETURN_RUNTIME_ERROR; }
                 REFRESH_FRAME();

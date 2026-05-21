@@ -22,6 +22,7 @@ add_library(akar_core STATIC
     src/vm/object_file.cpp
     src/vm/gc.cpp
     src/vm/profiler.cpp
+    src/vm/jit.cpp
 )
 target_include_directories(akar_core PUBLIC include)
 
