@@ -133,6 +133,12 @@ private:
     // CMP Xn, Xm (alias for SUBS XZR, Xn, Xm)
     void emit_cmp(int rn, int rm);
 
+    // BLR Xn (branch with link to register — for calling C helpers)
+    void emit_blr(int rn);
+
+    // Call a C function (address loaded into X8, then BLR X8)
+    void emit_call_helper_fp(void* func_addr);
+
     // UBFM (for shifts) — not needed in baseline
 
     // --- JIT compilation ---

@@ -192,8 +192,28 @@ void JITCompiler::emit_cmp(int rn, int rm) {
 }
 
 // ============================================================
-// JIT Helpers
+// JIT Helpers — C functions callable from JIT code
 // ============================================================
+
+static double jit_fmod(double a, double b) {
+    return std::fmod(a, b);
+}
+
+static int64_t jit_mod_eq_zero(double a, double b) {
+    return std::fmod(a, b) == 0.0 ? TRUE_BITS : FALSE_BITS;
+}
+
+// BLR Xn (branch with link to register)
+void JITCompiler::emit_blr(int rn) {
+    emit32(0xD63F0000u | ((rn & 0x1F) << 5));
+}
+
+// Call a C function via X8 (clobbers X8, X30/LR)
+// FP args in D0, D1; FP result in D0; int result in X0
+void JITCompiler::emit_call_helper_fp(void* func_addr) {
+    emit_load_imm64(8, reinterpret_cast<uint64_t>(func_addr)); // X8 = address
+    emit_blr(8);  // BLR X8
+}
 
 void JITCompiler::emit_bailout(int pc) {
     // *out_pc = pc
@@ -307,9 +327,12 @@ bool JITCompiler::compile_instruction(int& pc) {
     }
 
     case Opcode::MOD_NUM: {
-        // No hardware fmod on ARM64 — bail
-        emit_bailout(start_pc);
-        return false;
+        // Call jit_fmod(double, double) → double
+        emit_ldr_d(D0, REG_BASE, stack_offset(b));
+        emit_ldr_d(D1, REG_BASE, stack_offset(c));
+        emit_call_helper_fp(reinterpret_cast<void*>(&jit_fmod));
+        emit_str_d(D0, REG_BASE, stack_offset(a));
+        break;
     }
 
     // --- ADD_IMM (fused LOAD_IMM + ADD) ---
@@ -325,10 +348,14 @@ bool JITCompiler::compile_instruction(int& pc) {
         break;
     }
 
-    // --- MOD_EQ_ZERO: bail (no hardware fmod) ---
+    // --- MOD_EQ_ZERO: call helper, store bool result ---
     case Opcode::MOD_EQ_ZERO: {
-        emit_bailout(start_pc);
-        return false;
+        emit_ldr_d(D0, REG_BASE, stack_offset(b));
+        emit_ldr_d(D1, REG_BASE, stack_offset(c));
+        emit_call_helper_fp(reinterpret_cast<void*>(&jit_mod_eq_zero));
+        // Result is int64_t NaN-boxed bool in X0
+        emit_str(X0_R, REG_BASE, stack_offset(a));
+        break;
     }
 
     // --- Generic arithmetic: bail ---
@@ -470,7 +497,24 @@ bool JITCompiler::compile_instruction(int& pc) {
         break;
     }
 
-    case Opcode::JMP_IF_FALSE:
+    case Opcode::JMP_IF_FALSE: {
+        // Fast path for boolean/comparison results: check against FALSE_VAL and NIL_VAL
+        int target_pc = pc + sbx;
+        emit_ldr(X0_R, REG_BASE, stack_offset(a));
+        // Check FALSE_VAL (0x7FF8000000000001)
+        emit_load_imm64(X1_R, static_cast<uint64_t>(FALSE_BITS));
+        emit_cmp(X0_R, X1_R);
+        size_t false_branch = emit_b_cond(0x0, 0);  // B.EQ → jump if false
+        // Check NIL_VAL (0x7FFC000000000000)
+        emit_load_imm64(X1_R, static_cast<uint64_t>(NIL_BITS));
+        emit_cmp(X0_R, X1_R);
+        size_t nil_branch = emit_b_cond(0x0, 0);  // B.EQ → jump if nil
+        // Truthy: fall through
+        fixups_.push_back({false_branch, target_pc, 1});
+        fixups_.push_back({nil_branch, target_pc, 1});
+        break;
+    }
+
     case Opcode::JMP_IF_TRUE:
         emit_bailout(start_pc);
         return false;
