@@ -312,6 +312,9 @@ struct ObjEffect : Obj {
     ObjClosure* body = nullptr;               // the effect's closure
     SmallVec<ObjSignal*, 6> dependencies;     // signals this effect reads
     uint32_t last_queued_gen = 0;             // last generation when queued (dedup)
+    bool dirty = false;                        // set when signal written during Running state
+    uint32_t consecutive_reruns = 0;           // consecutive re-runs without other code running
+    static constexpr uint32_t MAX_RERUNS = 100; // safety limit to prevent infinite loops
     std::string name;                         // debug name
 
     ObjEffect() { type = ObjType::Effect; alloc_size = sizeof(ObjEffect); }

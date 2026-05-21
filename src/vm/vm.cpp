@@ -1124,6 +1124,23 @@ InterpretResult VM::run() {
         // (not from helper functions called within the effect)
         if (__builtin_expect(current_effect_ != nullptr && frame_count_ < effect_frame_depth_, 0)) {
             current_effect_->state = ObjEffect::State::Idle;
+            // If the effect's signal was written during execution (dirty),
+            // re-queue it once for a single re-run with the latest values.
+            // But limit consecutive re-runs to prevent infinite loops.
+            if (current_effect_->dirty) {
+                current_effect_->dirty = false;
+                current_effect_->consecutive_reruns++;
+                if (current_effect_->consecutive_reruns <= ObjEffect::MAX_RERUNS) {
+                    current_effect_->last_queued_gen = write_generation_;
+                    current_effect_->state = ObjEffect::State::Queued;
+                    effect_queue_.push_back(current_effect_);
+                } else {
+                    // Infinite loop detected — stop re-queuing
+                    current_effect_->consecutive_reruns = 0;
+                }
+            } else {
+                current_effect_->consecutive_reruns = 0; // reset on normal finish
+            }
             current_effect_ = nullptr;
         }
         if (__builtin_expect(frame_count_ == 0, 0)) {
@@ -2413,13 +2430,21 @@ InterpretResult VM::run() {
         }
         // Queue dependent effects for re-execution
         // Uses generation counter for O(1) dedup instead of checking state
+        // Skip effects that are currently Running (prevents infinite self-trigger loops)
+        // Mark them dirty so they re-run once after finishing
         {
             uint32_t gen = sig->write_generation;
             for (auto* eff : sig->subscribers) {
                 if (eff->last_queued_gen != gen && eff->body) {
-                    eff->last_queued_gen = gen;
-                    eff->state = ObjEffect::State::Queued;
-                    effect_queue_.push_back(eff);
+                    if (eff->state == ObjEffect::State::Running) {
+                        // Effect is currently running — mark dirty for re-run after finish
+                        eff->dirty = true;
+                    } else {
+                        eff->last_queued_gen = gen;
+                        eff->state = ObjEffect::State::Queued;
+                        eff->consecutive_reruns = 0; // reset on external trigger
+                        effect_queue_.push_back(eff);
+                    }
                 }
             }
         }
