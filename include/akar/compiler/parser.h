@@ -23,6 +23,9 @@ private:
     ASTPtr switch_statement();
     ASTPtr try_statement();
     ASTPtr throw_statement();
+    ASTPtr signal_declaration();
+    ASTPtr effect_statement();
+    ASTPtr enum_declaration();
     ASTPtr if_statement();
     ASTPtr while_statement();
     ASTPtr for_statement();

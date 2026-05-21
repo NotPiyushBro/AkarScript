@@ -22,9 +22,12 @@ struct ObjNative;
 struct ObjUpvalue;
 struct ObjFiber;
 struct ObjIterator;
+struct ObjSignal;
+struct ObjEffect;
 
 enum class ObjType {
-    String, Array, Map, Function, Closure, Class, Instance, Native, Upvalue, Fiber, Iterator
+    String, Array, Map, Function, Closure, Class, Instance, Native, Upvalue, Fiber, Iterator,
+    Signal, Effect
 };
 
 struct Obj {
@@ -89,7 +92,8 @@ struct Value {
     bool is_nil() const { return bits == NIL_VAL; }
     bool is_bool() const { return bits == FALSE_VAL || bits == TRUE_VAL; }
     bool is_number() const { return (bits & NAN_BASE) != NAN_BASE; }
-    bool is_obj() const { return (bits & NAN_BASE) == NAN_BASE && bits != NAN_BASE && !is_nil() && !is_bool(); }
+    // Enum tag: 0xFFFA in upper 16 bits
+    bool is_obj() const { return (bits & NAN_BASE) == NAN_BASE && bits != NAN_BASE && !is_nil() && !is_bool() && (bits & 0xFFFF000000000000ULL) != 0xFFFA000000000000ULL; }
     bool is_string() const;
     bool is_array() const;
     bool is_map() const;
@@ -100,6 +104,8 @@ struct Value {
     bool is_native() const;
     bool is_fiber() const;
     bool is_iterator() const;
+    bool is_signal() const;
+    bool is_effect() const;
 
     // Accessors
     bool get_bool() const { return bits == TRUE_VAL; }
@@ -132,6 +138,8 @@ struct Value {
     ObjNative* as_native() const;
     ObjFiber* as_fiber() const;
     ObjIterator* as_iterator() const;
+    ObjSignal* as_signal() const;
+    ObjEffect* as_effect() const;
 
     bool is_truthy() const;
     bool operator==(const Value& other) const;
@@ -258,6 +266,50 @@ struct ObjFiber : Obj {
     ObjFiber() { type = ObjType::Fiber; }
 };
 
+// Enum: NaN-boxed immediate values
+// Encoding: 0xFFFA000000000000 | (type_id << 16) | (variant_index)
+// This gives 65536 enum types, 65536 variants per type
+// For data-carrying variants, use ObjInstance with _enum_type and _variant fields
+static constexpr uint64_t ENUM_TAG = 0xFFFA000000000000ULL;
+
+inline Value make_enum_value(uint16_t type_id, uint16_t variant_index) {
+    Value v;
+    v.bits = ENUM_TAG | (static_cast<uint64_t>(type_id) << 16) | variant_index;
+    return v;
+}
+
+inline bool is_enum_value(Value v) {
+    return (v.bits & 0xFFFF000000000000ULL) == ENUM_TAG;
+}
+
+inline uint16_t enum_type_id(Value v) {
+    return static_cast<uint16_t>((v.bits >> 16) & 0xFFFF);
+}
+
+inline uint16_t enum_variant_index(Value v) {
+    return static_cast<uint16_t>(v.bits & 0xFFFF);
+}
+
+// Signal: reactive value container with dependency tracking
+struct ObjSignal : Obj {
+    Value value;                        // current value
+    std::vector<ObjEffect*> subscribers; // effects that depend on this signal
+    std::string name;                   // debug name
+
+    ObjSignal() { type = ObjType::Signal; alloc_size = sizeof(ObjSignal); }
+};
+
+// Effect: auto-running reactive block (executed as a mini-fiber)
+struct ObjEffect : Obj {
+    enum class State { Idle, Queued, Running };
+    State state = State::Idle;
+    ObjClosure* body = nullptr;         // the effect's closure
+    std::vector<ObjSignal*> dependencies; // signals this effect reads
+    std::string name;                   // debug name
+
+    ObjEffect() { type = ObjType::Effect; alloc_size = sizeof(ObjEffect); }
+};
+
 // String interning / allocation helpers
 ObjString* allocate_string(std::string value);
 ObjArray* allocate_array();
@@ -270,6 +322,8 @@ ObjNative* allocate_native(NativeFn fn, std::string name);
 ObjUpvalue* allocate_upvalue(Value* slot);
 ObjFiber* allocate_fiber();
 ObjIterator* allocate_iterator();
+ObjSignal* allocate_signal(Value initial_value, const std::string& name);
+ObjEffect* allocate_effect(ObjClosure* body, const std::string& name);
 
 // Global string table for interning
 class StringTable {

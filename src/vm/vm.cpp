@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cmath>
 #include <iostream>
+#include <algorithm>
 
 namespace akar {
 
@@ -69,9 +70,22 @@ void VM::mark_roots() {
     if (resume_fiber_) {
         gc_mark_object(static_cast<Obj*>(resume_fiber_));
     }
+    // Mark signal/effect tracking
+    if (current_effect_) {
+        gc_mark_object(static_cast<Obj*>(current_effect_));
+    }
+    for (auto* eff : effect_queue_) {
+        gc_mark_object(static_cast<Obj*>(eff));
+    }
 }
 
 void VM::collect_garbage() {
+    // Profiler: record GC start
+    bool gc_profiled = profiler_.is_profiling();
+    double gc_start = gc_profiled ? profiler_.now_us() : 0;
+    size_t before_bytes = get_allocated_bytes();
+    if (gc_profiled) profiler_.record_gc_start();
+
     // Mark roots from ALL active VMs
     for (VM* vm : active_vms_) {
         vm->mark_roots();
@@ -85,6 +99,13 @@ void VM::collect_garbage() {
     // Grow the threshold for next collection
     set_next_gc(get_allocated_bytes() * 2);
     gc_phase_ = GCPhase::Idle;
+
+    // Profiler: record GC end
+    if (gc_profiled) {
+        double gc_dur = profiler_.now_us() - gc_start;
+        size_t freed = (before_bytes > get_allocated_bytes()) ? (before_bytes - get_allocated_bytes()) : 0;
+        profiler_.record_gc_end(gc_dur, freed);
+    }
 }
 
 void VM::gc_step() {
@@ -256,6 +277,7 @@ InterpretResult VM::run() {
     #define CHECK_MEMORY_LIMIT() do { \
         if (__builtin_expect(++opcode_counter >= 128, 0)) { \
             opcode_counter = 0; \
+            if (__builtin_expect(profiler_.is_profiling(), 0)) { profiler_.record_opcodes(128); } \
             gc_step(); \
             if (memory_limit_exceeded()) { \
                 runtime_error("Memory limit exceeded (%zu bytes)", get_memory_limit()); \
@@ -295,11 +317,19 @@ InterpretResult VM::run() {
         &&op_TAIL_CALL, &&op_AWAIT, &&op_THROW, &&op_TRY_BEGIN, &&op_TRY_END,
         // Wide prefix
         &&op_WIDE,
+        // Signal & Effect
+        &&op_SIGNAL_CREATE, &&op_SIGNAL_GET, &&op_SIGNAL_SET,
+        &&op_EFFECT_CREATE, &&op_EFFECT_RUN,
+        // Enum
+        &&op_ENUM_CREATE, &&op_ENUM_VARIANT, &&op_ENUM_DATA_VARIANT,
+        &&op_ENUM_GET, &&op_ENUM_IS,
     };
 
     #define DISPATCH() do { \
+        if (__builtin_expect(!effect_queue_.empty(), 0)) { goto loop_continue; } \
         goto *dispatch_table[ip[0]]; \
     } while(0)
+
     #define CASE(op) op_##op
 
     // Operator overloading: try calling a magic method on the left operand's class
@@ -344,6 +374,34 @@ InterpretResult VM::run() {
 
     for (;;) {
     loop_continue:
+        // Drain queued effects at each dispatch cycle
+        if (__builtin_expect(!effect_queue_.empty(), 0)) {
+            ObjEffect* eff = effect_queue_.front();
+            effect_queue_.pop_front();
+            eff->state = ObjEffect::State::Running;
+            // Profiler: record effect re-run
+            if (__builtin_expect(profiler_.is_profiling(), 0)) {
+                profiler_.record_effect_run(eff->name.c_str(), true);
+            }
+            // Clear old dependencies
+            for (auto* old_sig : eff->dependencies) {
+                auto& subs = old_sig->subscribers;
+                subs.erase(std::remove(subs.begin(), subs.end(), eff), subs.end());
+            }
+            eff->dependencies.clear();
+            current_effect_ = eff;
+            effect_frame_depth_ = frame_count_ + 1;
+            frame->ip = ip;
+            int save_top = stack_top_;
+            stack_[stack_top_++] = Value(static_cast<Obj*>(eff->body));
+            int cp = save_top;
+            if (!call(eff->body, 0, cp, cp)) {
+                current_effect_ = nullptr;
+                eff->state = ObjEffect::State::Idle;
+                RETURN_RUNTIME_ERROR;
+            }
+            REFRESH_FRAME();
+        }
         DISPATCH();
 
     CASE(LOAD_CONST): {
@@ -716,6 +774,10 @@ InterpretResult VM::run() {
         VLOG("[CALL] a=%d args=%d callee_abs=%d callee=%s\n", a, arg_count, callee_abs, callee.to_string().c_str());
         if (callee.is_closure()) {
             auto* closure = callee.as_closure();
+            // Profiler: record function call
+            if (__builtin_expect(profiler_.is_profiling(), 0)) {
+                profiler_.record_call(closure->function->name.c_str());
+            }
             // Inline fast path: non-varargs, correct arity
             if (frame_count_ >= MAX_FRAMES) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
             int fixed_arity = closure->function->arity;
@@ -1052,7 +1114,18 @@ InterpretResult VM::run() {
         Value result = S(a);
         int callee_pos = frame->callee_stack_pos;
         int saved_top = frame->caller_stack_top;
+        // Profiler: record function return BEFORE popping the frame
+        if (__builtin_expect(profiler_.is_profiling(), 0)) {
+            const char* fname = frame->closure->function->name.c_str();
+            profiler_.record_return(fname, 0);
+        }
         frame_count_--;
+        // Clear effect context only when returning from the effect's own frame
+        // (not from helper functions called within the effect)
+        if (__builtin_expect(current_effect_ != nullptr && frame_count_ < effect_frame_depth_, 0)) {
+            current_effect_->state = ObjEffect::State::Idle;
+            current_effect_ = nullptr;
+        }
         if (__builtin_expect(frame_count_ == 0, 0)) {
             stack_top_ = 0;
             stack_[stack_top_++] = result;
@@ -1070,6 +1143,8 @@ InterpretResult VM::run() {
         frame = &frames_[frame_count_ - 1];
         base = frame->base_register;
         ip = frame->ip;
+        // If effects were queued, go back to loop_continue to drain them
+        if (__builtin_expect(!effect_queue_.empty(), 0)) goto loop_continue;
         DISPATCH();
     }
     CASE(AWAIT): {
@@ -1267,6 +1342,10 @@ InterpretResult VM::run() {
         } else if (obj.is_map()) {
             auto it = obj.as_map()->entries.find(field);
             S(a) = (it != obj.as_map()->entries.end()) ? it->second : Value();
+        } else if (obj.is_class()) {
+            auto& methods = obj.as_class()->methods;
+            auto it = methods.find(field);
+            S(a) = (it != methods.end()) ? it->second : Value();
         } else if (obj.is_string()) {
             if (field == "length" || field == HASH_LENGTH) {
                 S(a) = Value(static_cast<double>(obj.as_string()->value.size()));
@@ -1846,6 +1925,10 @@ InterpretResult VM::run() {
                 } else if (obj.is_map()) {
                     auto it = obj.as_map()->entries.find(field);
                     S(wa) = (it != obj.as_map()->entries.end()) ? it->second : Value();
+                } else if (obj.is_class()) {
+                    auto& methods = obj.as_class()->methods;
+                    auto it = methods.find(field);
+                    S(wa) = (it != methods.end()) ? it->second : Value();
                 } else if (obj.is_string()) {
                     if (field == "length" || field == HASH_LENGTH) {
                         S(wa) = Value(static_cast<double>(obj.as_string()->value.size()));
@@ -2275,6 +2358,260 @@ InterpretResult VM::run() {
             default:
                 runtime_error("Opcode %d cannot be used with WIDE prefix", wide_op);
                 RETURN_RUNTIME_ERROR;
+        }
+        DISPATCH();
+    }
+
+    // === Signal & Effect opcodes ===
+    CASE(SIGNAL_CREATE): {
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
+        auto* sig = allocate_signal(S(b), "signal");
+        S(a) = Value(static_cast<Obj*>(sig));
+        DISPATCH();
+    }
+    CASE(SIGNAL_GET): {
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
+        Value sig_val = S(b);
+        if (!sig_val.is_signal()) {
+            runtime_error("SIGNAL_GET: not a signal");
+            RETURN_RUNTIME_ERROR;
+        }
+        auto* sig = sig_val.as_signal();
+        S(a) = sig->value;
+        // Track dependency if inside an effect
+        if (current_effect_) {
+            // Check if already subscribed
+            bool found = false;
+            for (auto* dep : current_effect_->dependencies) {
+                if (dep == sig) { found = true; break; }
+            }
+            if (!found) {
+                current_effect_->dependencies.push_back(sig);
+                sig->subscribers.push_back(current_effect_);
+                // Profiler: record signal read (only when tracking dependency)
+                if (__builtin_expect(profiler_.is_profiling(), 0)) {
+                    profiler_.record_signal_read(sig->name.c_str());
+                }
+            }
+        }
+        DISPATCH();
+    }
+    CASE(SIGNAL_SET): {
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
+        Value sig_val = S(a);
+        if (!sig_val.is_signal()) {
+            runtime_error("SIGNAL_SET: not a signal");
+            RETURN_RUNTIME_ERROR;
+        }
+        auto* sig = sig_val.as_signal();
+        sig->value = S(b);
+        // Profiler: record signal write
+        if (__builtin_expect(profiler_.is_profiling(), 0)) {
+            profiler_.record_signal_write(sig->name.c_str());
+        }
+        // Queue dependent effects for re-execution
+        for (auto* eff : sig->subscribers) {
+            if (eff->state != ObjEffect::State::Queued && eff->body) {
+                eff->state = ObjEffect::State::Queued;
+                effect_queue_.push_back(eff);
+            }
+        }
+        DISPATCH();
+    }
+    CASE(EFFECT_CREATE): {
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        ip += 4;
+        Value closure_val = S(b);
+        if (!closure_val.is_closure()) {
+            runtime_error("EFFECT_CREATE: body must be a closure");
+            RETURN_RUNTIME_ERROR;
+        }
+        auto* eff = allocate_effect(closure_val.as_closure(), "effect");
+        S(a) = Value(static_cast<Obj*>(eff));
+        DISPATCH();
+    }
+    CASE(EFFECT_RUN): {
+        uint8_t a = ip[1];
+        ip += 4;
+        Value eff_val = S(a);
+        if (!eff_val.is_effect()) {
+            runtime_error("EFFECT_RUN: not an effect");
+            RETURN_RUNTIME_ERROR;
+        }
+        auto* eff = eff_val.as_effect();
+        if (!eff->body) DISPATCH();
+
+        // Profiler: record effect run
+        if (__builtin_expect(profiler_.is_profiling(), 0)) {
+            profiler_.record_effect_run(eff->name.c_str(), false);
+        }
+
+        // Clear old dependencies
+        for (auto* old_sig : eff->dependencies) {
+            auto& subs = old_sig->subscribers;
+            subs.erase(std::remove(subs.begin(), subs.end(), eff), subs.end());
+        }
+        eff->dependencies.clear();
+        eff->state = ObjEffect::State::Running;
+
+        // Set current_effect_ BEFORE calling so SIGNAL_GET tracks dependencies
+        current_effect_ = eff;
+        effect_frame_depth_ = frame_count_ + 1; // effect will be at this depth
+
+        // Push the effect body closure and call it directly.
+        // The effect body will execute inline in the current run() loop.
+        VLOG("[EFFECT_RUN] calling effect body, frame_count=%d, stack_top=%d\n", frame_count_, stack_top_);
+        frame->ip = ip;
+        int save_top = stack_top_;
+        stack_[stack_top_++] = Value(static_cast<Obj*>(eff->body));
+        int callee_pos = save_top;
+        if (!call(eff->body, 0, callee_pos, callee_pos)) {
+            current_effect_ = nullptr;
+            RETURN_RUNTIME_ERROR;
+        }
+        // Refresh frame/base/ip to point to the new effect body frame
+        REFRESH_FRAME();
+        // The effect body will now execute via DISPATCH (it's the new top frame).
+        // When it RETURNs, the RETURN handler will pop the frame and
+        // DISPATCH to the next instruction after EFFECT_RUN.
+        DISPATCH();
+    }
+
+    // === Enum opcodes ===
+    CASE(ENUM_CREATE): {
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
+        auto& constants = frame->closure->function->constants;
+        if (bx >= constants.size() || !constants[bx].is_string()) {
+            runtime_error("Invalid enum name constant");
+            RETURN_RUNTIME_ERROR;
+        }
+        ObjString* name = constants[bx].as_string();
+        auto* cls = allocate_class(name->value);
+        // Store type_id as a special field
+        uint16_t tid = enum_type_counter_++;
+        cls->methods["_type_id"] = Value(static_cast<double>(tid));
+        S(a) = Value(static_cast<Obj*>(cls));
+        DISPATCH();
+    }
+    CASE(ENUM_VARIANT): {
+        uint8_t a = ip[1];  // class register
+        uint8_t b = ip[2];  // variant name constant index
+        uint8_t c = ip[3];  // constant index containing variant index
+        ip += 4;
+        auto& constants = frame->closure->function->constants;
+        if (!S(a).is_class()) {
+            runtime_error("ENUM_VARIANT: not a class");
+            RETURN_RUNTIME_ERROR;
+        }
+        auto* cls = S(a).as_class();
+        if (b >= constants.size() || !constants[b].is_string()) {
+            runtime_error("Invalid variant name constant");
+            RETURN_RUNTIME_ERROR;
+        }
+        ObjString* variant_name = constants[b].as_string();
+        // Get type_id from class
+        double type_id_d = 0;
+        auto tid_it = cls->methods.find("_type_id");
+        if (tid_it != cls->methods.end() && tid_it->second.is_number()) {
+            type_id_d = tid_it->second.get_number();
+        }
+        uint16_t type_id = static_cast<uint16_t>(type_id_d);
+        // Read variant index from constant pool
+        uint16_t variant_idx = 0;
+        if (c < constants.size() && constants[c].is_number()) {
+            variant_idx = static_cast<uint16_t>(constants[c].get_number());
+        }
+        // Create NaN-boxed enum value
+        Value enum_val = make_enum_value(type_id, variant_idx);
+        cls->methods[variant_name->value] = enum_val;
+        DISPATCH();
+    }
+    CASE(ENUM_DATA_VARIANT): {
+        uint8_t a = ip[1];  // class register
+        uint8_t b = ip[2];  // variant name constant index
+        ip += 4;
+        auto& constants = frame->closure->function->constants;
+        if (!S(a).is_class()) {
+            runtime_error("ENUM_DATA_VARIANT: not a class");
+            RETURN_RUNTIME_ERROR;
+        }
+        auto* cls = S(a).as_class();
+        if (b >= constants.size() || !constants[b].is_string()) {
+            runtime_error("Invalid variant name constant");
+            RETURN_RUNTIME_ERROR;
+        }
+        ObjString* variant_name = constants[b].as_string();
+        // For data variants, we store a special marker.
+        // When called as Enum.Variant(value), the VM creates an instance with the value.
+        // We'll store a string marker that the GET_FIELD handler recognizes.
+        auto* marker = get_string_table().intern("__data_variant__:" + variant_name->value);
+        cls->methods[variant_name->value] = Value(static_cast<Obj*>(marker));
+        DISPATCH();
+    }
+    CASE(ENUM_GET): {
+        // A = R[B].variant_C — get enum variant from class
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
+        auto& constants = frame->closure->function->constants;
+        Value obj = S(b);
+        if (obj.is_class() && c < constants.size() && constants[c].is_string()) {
+            ObjString* name = constants[c].as_string();
+            auto it = obj.as_class()->methods.find(name->value);
+            S(a) = (it != obj.as_class()->methods.end()) ? it->second : Value();
+        } else {
+            S(a) = Value();
+        }
+        DISPATCH();
+    }
+    CASE(ENUM_IS): {
+        // A = is_enum_type(R[B], name_const_C) — check if value belongs to enum
+        uint8_t a = ip[1];
+        uint8_t b = ip[2];
+        uint8_t c = ip[3];
+        ip += 4;
+        auto& constants = frame->closure->function->constants;
+        Value val = S(b);
+        if (c >= constants.size() || !constants[c].is_string()) {
+            S(a) = Value(false);
+            DISPATCH();
+        }
+        ObjString* enum_name = constants[c].as_string();
+        // Simple enum values: NaN-boxed, check by looking up the enum class's _type_id
+        if (is_enum_value(val)) {
+            // Find the enum class by name in globals
+            auto it = globals_.find(enum_name);
+            if (it != globals_.end() && it->second.is_class()) {
+                auto tid_it = it->second.as_class()->methods.find("_type_id");
+                if (tid_it != it->second.as_class()->methods.end() && tid_it->second.is_number()) {
+                    uint16_t expected_tid = static_cast<uint16_t>(tid_it->second.get_number());
+                    S(a) = Value(enum_type_id(val) == expected_tid);
+                } else {
+                    S(a) = Value(false);
+                }
+            } else {
+                S(a) = Value(false);
+            }
+        } else if (val.is_instance()) {
+            // Data variant instances have _enum_type field
+            auto ft = val.as_instance()->fields.find("_enum_type");
+            if (ft != val.as_instance()->fields.end() && ft->second.is_string()) {
+                S(a) = Value(ft->second.as_string()->value == enum_name->value);
+            } else {
+                S(a) = Value(false);
+            }
+        } else {
+            S(a) = Value(false);
         }
         DISPATCH();
     }

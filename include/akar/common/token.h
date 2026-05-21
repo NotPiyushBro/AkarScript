@@ -12,6 +12,7 @@ enum class TokenType {
     Let, Fn, If, Else, While, For, In, Return, Break, Continue,
     Class, This, Super, New, And, Or, Not, Include, Await,
     Switch, Case, Default, Try, Catch, Throw,
+    Signal, Effect, Enum,
 
     // Operators
     Plus, Minus, Star, Slash, Percent,

@@ -116,6 +116,21 @@ enum class Opcode : uint8_t {
 
     // Wide prefix - next instruction uses 16-bit register fields
     WIDE,           // prefix: next instruction is [op:8][A:16][B:16][C:16] = 7 bytes
+
+    // Signal & Effect (Reactive primitives)
+    SIGNAL_CREATE,  // A = signal(B) — create signal with initial value from R[B]
+    SIGNAL_GET,     // A = signal_read(B) — read signal value, track dependency if in effect
+    SIGNAL_SET,     // signal_write(A, B) — update signal R[A] with value R[B], notify effects
+
+    EFFECT_CREATE,  // A = effect(B) — create effect from closure R[B]
+    EFFECT_RUN,     // run_effect(A) — schedule effect R[A] for immediate execution
+
+    // Enum
+    ENUM_CREATE,    // A = enum(name_BX) — create enum class with name from constants[BX]
+    ENUM_VARIANT,   // set_variant(A, B, C) — register variant: class R[A], name const_B, simple value R[C]
+    ENUM_DATA_VARIANT, // set_data_variant(A, B) — register data variant: class R[A], name const_B (creates factory method)
+    ENUM_GET,       // A = R[B].variant_C — get enum variant (constant index C)
+    ENUM_IS,        // A = is_enum_type(R[B], name_const_C) — check if R[B] belongs to enum with name const_C
 };
 
 inline uint8_t op_byte(Opcode op) { return static_cast<uint8_t>(op); }

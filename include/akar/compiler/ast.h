@@ -25,6 +25,7 @@ enum class NodeType {
     LetStmt, FnStmt, ClassStmt, IncludeStmt,
     AwaitStmt, DestructuringStmt,
     SwitchStmt, TryCatchStmt, ThrowStmt,
+    EnumStmt, SignalDeclStmt, EffectStmt,
 };
 
 struct ASTNode {
@@ -288,6 +289,33 @@ struct TryCatchStmt : ASTNode {
 struct ThrowStmt : ASTNode {
     ASTPtr value;
     ThrowStmt(ASTPtr v, int l) : ASTNode(NodeType::ThrowStmt, l), value(std::move(v)) {}
+};
+
+// ---- Enums ----
+
+struct EnumVariant {
+    std::string name;
+    ASTPtr value;  // nullptr for simple variant, expression for associated data
+};
+
+struct EnumStmt : ASTNode {
+    std::string name;
+    std::vector<EnumVariant> variants;
+    EnumStmt(std::string n, int l) : ASTNode(NodeType::EnumStmt, l), name(std::move(n)) {}
+};
+
+// ---- Signals & Effects ----
+
+struct SignalDeclStmt : ASTNode {
+    std::string name;
+    ASTPtr initializer;  // initial value expression
+    SignalDeclStmt(std::string n, ASTPtr init, int l)
+        : ASTNode(NodeType::SignalDeclStmt, l), name(std::move(n)), initializer(std::move(init)) {}
+};
+
+struct EffectStmt : ASTNode {
+    ASTPtr body;  // block statement
+    EffectStmt(ASTPtr b, int l) : ASTNode(NodeType::EffectStmt, l), body(std::move(b)) {}
 };
 
 } // namespace akar

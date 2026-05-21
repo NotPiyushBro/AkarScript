@@ -227,6 +227,9 @@ void CodeGenerator::compile_stmt(const ASTPtr& node) {
         case NodeType::SwitchStmt: compile_switch(static_cast<SwitchStmt*>(node.get())); break;
         case NodeType::TryCatchStmt: compile_try_catch(static_cast<TryCatchStmt*>(node.get())); break;
         case NodeType::ThrowStmt: compile_throw(static_cast<ThrowStmt*>(node.get())); break;
+        case NodeType::SignalDeclStmt: compile_signal_decl(static_cast<SignalDeclStmt*>(node.get())); break;
+        case NodeType::EffectStmt: compile_effect(static_cast<EffectStmt*>(node.get())); break;
+        case NodeType::EnumStmt: compile_enum(static_cast<EnumStmt*>(node.get())); break;
         default:
             // Treat as expression
             { compile_expr(node); free_register(); }
@@ -297,18 +300,37 @@ void CodeGenerator::compile_identifier(Identifier* node, int reg) {
     // Try local first
     int local = resolve_local(node->name);
     if (local >= 0) {
-        emit(op_byte(Opcode::MOVE), reg, local, 0);
+        // If it's a signal, emit SIGNAL_GET to read its value and track dependencies
+        if (signal_set_.count(node->name)) {
+            emit(op_byte(Opcode::SIGNAL_GET), reg, local, 0);
+        } else {
+            emit(op_byte(Opcode::MOVE), reg, local, 0);
+        }
         return;
     }
     // Try upvalue
     int upvalue = resolve_upvalue(node->name);
     if (upvalue >= 0) {
-        emit(op_byte(Opcode::GET_UPVALUE), reg, upvalue, 0);
+        if (signal_set_.count(node->name)) {
+            int sig_reg = alloc_register();
+            emit(op_byte(Opcode::GET_UPVALUE), sig_reg, upvalue, 0);
+            emit(op_byte(Opcode::SIGNAL_GET), reg, sig_reg, 0);
+            free_register(); // sig_reg
+        } else {
+            emit(op_byte(Opcode::GET_UPVALUE), reg, upvalue, 0);
+        }
         return;
     }
-    // Global
+    // Global: check if it's a signal
     uint16_t name_const = make_identifier_constant(node->name);
-    emit_bx(op_byte(Opcode::GET_GLOBAL), reg, name_const);
+    if (signal_set_.count(node->name)) {
+        int sig_reg = alloc_register();
+        emit_bx(op_byte(Opcode::GET_GLOBAL), sig_reg, name_const);
+        emit(op_byte(Opcode::SIGNAL_GET), reg, sig_reg, 0);
+        free_register(); // sig_reg
+    } else {
+        emit_bx(op_byte(Opcode::GET_GLOBAL), reg, name_const);
+    }
 }
 
 void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
@@ -522,6 +544,25 @@ void CodeGenerator::compile_field_set(FieldSetExpr* node, int reg) {
 }
 
 void CodeGenerator::compile_assignment(AssignmentExpr* node, int reg) {
+    // Signal assignment: emit SIGNAL_SET instead of MOVE
+    if (signal_set_.count(node->name)) {
+        int val = compile_expr(node->value);
+        int local = resolve_local(node->name);
+        if (local >= 0) {
+            emit(op_byte(Opcode::SIGNAL_SET), local, val, 0);
+        } else {
+            // Signal stored as global: load signal object, then SIGNAL_SET
+            uint16_t name_const = make_identifier_constant(node->name);
+            int sig_reg = alloc_register();
+            emit_bx(op_byte(Opcode::GET_GLOBAL), sig_reg, name_const);
+            emit(op_byte(Opcode::SIGNAL_SET), sig_reg, val, 0);
+            free_register(); // sig_reg
+        }
+        emit(op_byte(Opcode::MOVE), reg, val, 0);
+        free_register(); // val
+        return;
+    }
+
     // Peephole: local = local op expr → emit op directly to local register
     // Eliminates 2 MOVEs: one for the temp result, one for the assignment
     if (node->value->type == NodeType::Binary) {
@@ -1353,6 +1394,93 @@ uint16_t CodeGenerator::make_identifier_constant(const std::string& name) {
     uint16_t idx = make_constant(Value(static_cast<Obj*>(str)));
     identifier_values_.insert(name);
     return idx;
+}
+
+void CodeGenerator::compile_signal_decl(SignalDeclStmt* node) {
+    // Compile the initial value
+    int init_reg = compile_expr(node->initializer);
+    // Create signal: SIGNAL_CREATE dest, init_reg
+    int sig_reg = alloc_register();
+    emit(op_byte(Opcode::SIGNAL_CREATE), sig_reg, init_reg, 0);
+    free_register(); // init_reg
+
+    // Track this variable as a signal
+    signal_set_.insert(node->name);
+
+    if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
+        // Top-level: set as global
+        uint16_t name_const = make_identifier_constant(node->name);
+        emit_bx(op_byte(Opcode::SET_GLOBAL), sig_reg, name_const);
+        free_register(); // sig_reg
+    } else {
+        declare_local(node->name, sig_reg);
+    }
+}
+
+void CodeGenerator::compile_effect(EffectStmt* node) {
+    // The effect body becomes a closure (function with no args)
+    auto* func = compile_function("__effect__", {}, node->body);
+    uint16_t func_const = make_constant(Value(static_cast<Obj*>(func)));
+
+    // Create closure
+    int closure_reg = alloc_register();
+    emit_bx(op_byte(Opcode::CLOSURE), closure_reg, func_const);
+
+    // Create effect from closure: EFFECT_CREATE dest, closure_reg
+    int effect_reg = alloc_register();
+    emit(op_byte(Opcode::EFFECT_CREATE), effect_reg, closure_reg, 0);
+    free_register(); // closure_reg
+
+    // Run the effect immediately (also registers dependencies)
+    emit(op_byte(Opcode::EFFECT_RUN), effect_reg, 0, 0);
+    free_register(); // effect_reg
+}
+
+void CodeGenerator::compile_enum(EnumStmt* node) {
+    // Assign a type ID to this enum
+    uint16_t type_id = enum_type_id_counter_++;
+    enum_type_ids_[node->name] = type_id;
+
+    // Create a class to hold enum variants
+    uint16_t name_const = make_identifier_constant(node->name);
+    int class_reg = alloc_register();
+    emit_bx(op_byte(Opcode::ENUM_CREATE), class_reg, name_const);
+
+    // Store type_id as a constant for later use
+    uint16_t type_id_const = make_constant(Value(static_cast<double>(type_id)));
+
+    // Register each variant
+    int vi = 0;
+    for (auto& variant : node->variants) {
+        uint16_t variant_name_const = make_identifier_constant(variant.name);
+
+        if (variant.value) {
+            // Data-carrying variant: creates a factory method on the class
+            // For now, we store the variant index and let the factory create instances
+            // ENUM_DATA_VARIANT class_reg, variant_name_const
+            emit(op_byte(Opcode::ENUM_DATA_VARIANT), class_reg, variant_name_const, 0);
+        } else {
+            // Simple variant: NaN-boxed immediate value
+            // Create the enum value constant
+            int val_reg = alloc_register();
+            // Load type_id and variant_index as constants, then the VM will create the enum value
+            // We use ENUM_VARIANT: class_reg, name_const, value_const
+            // The value is the variant index encoded as a number (VM will convert to NaN-boxed enum)
+            uint16_t vi_const = make_constant(Value(static_cast<double>(vi)));
+            emit(op_byte(Opcode::ENUM_VARIANT), class_reg, variant_name_const, vi_const);
+            free_register(); // val_reg
+        }
+        vi++;
+    }
+
+    // At top level, set as global
+    if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
+        uint16_t name_const2 = make_identifier_constant(node->name);
+        emit_bx(op_byte(Opcode::SET_GLOBAL), class_reg, name_const2);
+        free_register(); // class_reg
+    } else {
+        declare_local(node->name, class_reg);
+    }
 }
 
 } // namespace akar

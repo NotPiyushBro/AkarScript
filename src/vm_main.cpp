@@ -102,6 +102,8 @@ static int run_ak_file(const std::string& path) {
 int main(int argc, char* argv[]) {
     // Parse flags
     bool verbose = false;
+    bool profile = false;
+    bool trace = false;
     std::string file_path;
     std::string eval_code;
 
@@ -109,6 +111,10 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "-v" || arg == "--verbose") {
             verbose = true;
+        } else if (arg == "-p" || arg == "--profile") {
+            profile = true;
+        } else if (arg == "-t" || arg == "--trace") {
+            trace = true;
         } else if (arg == "-e" || arg == "--eval") {
             if (i + 1 < argc) {
                 eval_code = argv[++i];
@@ -120,6 +126,8 @@ int main(int argc, char* argv[]) {
             std::cout << "Usage: akar [options] [file.ak | file.ako]" << std::endl;
             std::cout << "Options:" << std::endl;
             std::cout << "  -v, --verbose   Enable verbose VM tracing" << std::endl;
+            std::cout << "  -p, --profile   Enable profiling (report on exit)" << std::endl;
+            std::cout << "  -t, --trace     Enable event tracing (dump on exit)" << std::endl;
             std::cout << "  -e, --eval CODE Evaluate code string" << std::endl;
             std::cout << "  -h, --help      Show this help" << std::endl;
             return 0;
@@ -131,7 +139,11 @@ int main(int argc, char* argv[]) {
     if (!eval_code.empty()) {
         akar::VM vm;
         vm.set_verbose(verbose);
+        if (profile) vm.set_profiling(true);
+        if (trace) vm.set_tracing(true);
         auto result = vm.interpret(eval_code);
+        if (trace) vm.profiler_.print_trace_log();
+        if (profile) vm.profiler_.print_profile_report();
         if (result == akar::InterpretResult::CompileError) {
             std::cerr << "Compile error: " << vm.last_error() << std::endl;
             return 1;
@@ -152,7 +164,11 @@ int main(int argc, char* argv[]) {
             }
             akar::VM vm;
             vm.set_verbose(verbose);
+            if (profile) vm.set_profiling(true);
+            if (trace) vm.set_tracing(true);
             auto result = vm.run_function(func);
+            if (trace) vm.profiler_.print_trace_log();
+            if (profile) vm.profiler_.print_profile_report();
             if (result == akar::InterpretResult::RuntimeError) {
                 std::cerr << "Runtime error: " << vm.last_error() << std::endl;
                 return 1;
@@ -196,7 +212,11 @@ int main(int argc, char* argv[]) {
 
         akar::VM vm;
         vm.set_verbose(verbose);
+        if (profile) vm.set_profiling(true);
+        if (trace) vm.set_tracing(true);
         auto result = vm.run_function(func);
+        if (trace) vm.profiler_.print_trace_log();
+        if (profile) vm.profiler_.print_profile_report();
         if (result == akar::InterpretResult::RuntimeError) {
             std::cerr << "Runtime error: " << vm.last_error() << std::endl;
             return 1;
@@ -207,6 +227,8 @@ int main(int argc, char* argv[]) {
     // REPL mode
     akar::VM vm;
     vm.set_verbose(verbose);
+    if (profile) vm.set_profiling(true);
+    if (trace) vm.set_tracing(true);
     std::cout << "Akar Script v0.1.0" << std::endl;
     std::cout << "Type 'exit' to quit." << std::endl;
 

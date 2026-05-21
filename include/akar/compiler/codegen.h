@@ -84,6 +84,9 @@ private:
     void compile_switch(SwitchStmt* node);
     void compile_try_catch(TryCatchStmt* node);
     void compile_throw(ThrowStmt* node);
+    void compile_signal_decl(SignalDeclStmt* node);
+    void compile_effect(EffectStmt* node);
+    void compile_enum(EnumStmt* node);
     void compile_expr_stmt(ExprStmt* node);
 
     // Register allocation
@@ -117,6 +120,13 @@ private:
     // Include support
     std::string base_path_;
     std::set<std::string> visited_files_;
+
+    // Signal support: track which variables are signals
+    std::set<std::string> signal_set_;
+
+    // Enum support: track enum type IDs
+    uint16_t enum_type_id_counter_ = 0;
+    std::unordered_map<std::string, uint16_t> enum_type_ids_;  // class name -> type_id
 
     // Symbol stripping: track which string values are identifiers vs literals
     std::set<std::string> identifier_values_;

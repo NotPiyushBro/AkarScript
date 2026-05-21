@@ -130,6 +130,22 @@ void gc_trace_references(Obj* obj) {
             if (iter->str) gc_mark_object(static_cast<Obj*>(iter->str));
             break;
         }
+        case ObjType::Signal: {
+            auto* sig = static_cast<ObjSignal*>(obj);
+            gc_mark_value(sig->value);
+            for (auto* eff : sig->subscribers) {
+                gc_mark_object(static_cast<Obj*>(eff));
+            }
+            break;
+        }
+        case ObjType::Effect: {
+            auto* eff = static_cast<ObjEffect*>(obj);
+            if (eff->body) gc_mark_object(static_cast<Obj*>(eff->body));
+            for (auto* sig : eff->dependencies) {
+                gc_mark_object(static_cast<Obj*>(sig));
+            }
+            break;
+        }
         case ObjType::String:
         case ObjType::Native:
             break; // no child references
@@ -307,6 +323,30 @@ ObjIterator* allocate_iterator() {
     return obj;
 }
 
+ObjSignal* allocate_signal(Value initial_value, const std::string& name) {
+    size_t bytes = sizeof(ObjSignal) + name.capacity();
+    track_alloc(bytes);
+    auto* obj = new ObjSignal();
+    obj->value = initial_value;
+    obj->name = name;
+    obj->alloc_size = bytes;
+    obj->next = g_objects;
+    g_objects = obj;
+    return obj;
+}
+
+ObjEffect* allocate_effect(ObjClosure* body, const std::string& name) {
+    size_t bytes = sizeof(ObjEffect) + name.capacity();
+    track_alloc(bytes);
+    auto* obj = new ObjEffect();
+    obj->body = body;
+    obj->name = name;
+    obj->alloc_size = bytes;
+    obj->next = g_objects;
+    g_objects = obj;
+    return obj;
+}
+
 ObjString* StringTable::intern(const std::string& s) {
     auto it = strings_.find(s);
     if (it != strings_.end()) return it->second;
@@ -336,6 +376,8 @@ bool Value::is_instance() const { return is_obj() && as_obj()->type == ObjType::
 bool Value::is_native() const { return is_obj() && as_obj()->type == ObjType::Native; }
 bool Value::is_fiber() const { return is_obj() && as_obj()->type == ObjType::Fiber; }
 bool Value::is_iterator() const { return is_obj() && as_obj()->type == ObjType::Iterator; }
+bool Value::is_signal() const { return is_obj() && as_obj()->type == ObjType::Signal; }
+bool Value::is_effect() const { return is_obj() && as_obj()->type == ObjType::Effect; }
 
 ObjString* Value::as_string() const { return static_cast<ObjString*>(as_obj()); }
 ObjArray* Value::as_array() const { return static_cast<ObjArray*>(as_obj()); }
@@ -347,6 +389,8 @@ ObjInstance* Value::as_instance() const { return static_cast<ObjInstance*>(as_ob
 ObjNative* Value::as_native() const { return static_cast<ObjNative*>(as_obj()); }
 ObjFiber* Value::as_fiber() const { return static_cast<ObjFiber*>(as_obj()); }
 ObjIterator* Value::as_iterator() const { return static_cast<ObjIterator*>(as_obj()); }
+ObjSignal* Value::as_signal() const { return static_cast<ObjSignal*>(as_obj()); }
+ObjEffect* Value::as_effect() const { return static_cast<ObjEffect*>(as_obj()); }
 
 bool Value::is_truthy() const {
     if (is_nil()) return false;
@@ -356,14 +400,14 @@ bool Value::is_truthy() const {
         std::memcpy(&d, &bits, 8);
         return d != 0 && !std::isnan(d);
     }
+    // Enum values are always truthy (they are non-nil, non-zero)
+    if (is_enum_value(*this)) return true;
     return true; // objects are truthy
 }
 
 bool Value::operator==(const Value& other) const {
-    // Fast path: same bits means same value (covers nil, bool, same pointer)
+    // Fast path: same bits means same value (covers nil, bool, same pointer, enum)
     if (bits == other.bits) {
-        // For numbers: +0 == -0 must be true, but they have different bits.
-        // Since bits match here, it's either the exact same number or same non-number.
         return true;
     }
     // Both numbers: compare as doubles
@@ -377,6 +421,7 @@ bool Value::operator==(const Value& other) const {
     if (is_string() && other.is_string()) {
         return as_string()->value == other.as_string()->value;
     }
+    // Both enum values: bits already compared above (different enum values have different bits)
     // Different types or different pointers
     return false;
 }
@@ -393,6 +438,11 @@ std::string Value::to_string() const {
         std::ostringstream ss;
         ss << d;
         return ss.str();
+    }
+    // Enum values (NaN-boxed immediate)
+    if (is_enum_value(*this)) {
+        return "<enum #" + std::to_string(enum_type_id(*this)) + ":" +
+               std::to_string(enum_variant_index(*this)) + ">";
     }
     if (is_obj()) {
         auto* obj = as_obj();
@@ -423,7 +473,37 @@ std::string Value::to_string() const {
             case ObjType::Function: return "<fn " + as_function()->name + ">";
             case ObjType::Closure: return "<fn " + as_closure()->function->name + ">";
             case ObjType::Class: return "<class " + as_class()->name + ">";
-            case ObjType::Instance: return "<" + as_instance()->klass->name + " instance>";
+            case ObjType::Instance: {
+                auto* inst = as_instance();
+                // Check for enum data variant instances
+                auto it = inst->fields.find("_enum_variant");
+                if (it != inst->fields.end() && it->second.is_number()) {
+                    auto type_it = inst->fields.find("_enum_type");
+                    std::string type_name = inst->klass->name;
+                    if (type_it != inst->fields.end() && type_it->second.is_string()) {
+                        type_name = type_it->second.as_string()->value;
+                    }
+                    int vi = static_cast<int>(it->second.get_number());
+                    // Find variant name from class methods (stored as field names)
+                    std::string variant_name = "Variant" + std::to_string(vi);
+                    for (auto& [k, v] : inst->klass->methods) {
+                        // Variant names are stored as class fields
+                    }
+                    for (auto& [k, v] : inst->fields) {
+                        if (k.rfind("_variant_name:", 0) == 0) {
+                            variant_name = k.substr(14);
+                            break;
+                        }
+                    }
+                    // Show associated value
+                    auto val_it = inst->fields.find("_value");
+                    if (val_it != inst->fields.end()) {
+                        return type_name + "." + variant_name + "(" + val_it->second.to_string() + ")";
+                    }
+                    return type_name + "." + variant_name;
+                }
+                return "<" + inst->klass->name + " instance>";
+            }
             case ObjType::Native: return "<native " + as_native()->name + ">";
             case ObjType::Fiber: {
                 const char* state_str = "created";
@@ -434,6 +514,14 @@ std::string Value::to_string() const {
             }
             case ObjType::Iterator: return "<iterator>";
             case ObjType::Upvalue: return "<upvalue>";
+            case ObjType::Signal: {
+                auto* sig = as_signal();
+                return "<signal " + sig->name + " = " + sig->value.to_string() + ">";
+            }
+            case ObjType::Effect: {
+                auto* eff = as_effect();
+                return "<effect " + eff->name + ">";
+            }
         }
     }
     return "<unknown>";

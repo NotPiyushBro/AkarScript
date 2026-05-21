@@ -20,6 +20,9 @@ ASTPtr Parser::declaration() {
     if (match(TokenType::Fn)) return fn_declaration();
     if (match(TokenType::Class)) return class_declaration();
     if (match(TokenType::Include)) return include_declaration();
+    if (match(TokenType::Signal)) return signal_declaration();
+    if (match(TokenType::Effect)) return effect_statement();
+    if (match(TokenType::Enum)) return enum_declaration();
     return statement();
 }
 
@@ -119,6 +122,49 @@ ASTPtr Parser::include_declaration() {
     auto path_tok = expect(TokenType::String, "Expected file path string after 'include'");
     match(TokenType::Semicolon);
     return std::make_shared<IncludeStmt>(path_tok.string_value, path_tok.line);
+}
+
+ASTPtr Parser::signal_declaration() {
+    int line = previous().line;
+    auto name_tok = expect(TokenType::Identifier, "Expected signal name");
+    expect(TokenType::Equal, "Expected '=' after signal name");
+    auto init = expression();
+    match(TokenType::Semicolon);
+    return std::make_shared<SignalDeclStmt>(name_tok.lexeme, init, line);
+}
+
+ASTPtr Parser::effect_statement() {
+    int line = previous().line;
+    expect(TokenType::LeftBrace, "Expected '{' after 'effect'");
+    auto body = block();
+    return std::make_shared<EffectStmt>(body, line);
+}
+
+ASTPtr Parser::enum_declaration() {
+    int line = previous().line;
+    auto name_tok = expect(TokenType::Identifier, "Expected enum name");
+    expect(TokenType::LeftBrace, "Expected '{' before enum body");
+    auto node = std::make_shared<EnumStmt>(name_tok.lexeme, line);
+
+    if (!check(TokenType::RightBrace)) {
+        do {
+            auto variant_name = expect(TokenType::Identifier, "Expected variant name");
+            EnumVariant variant;
+            variant.name = variant_name.lexeme;
+            // Optional associated value: Variant(expr) or Variant = expr
+            if (match(TokenType::LeftParen)) {
+                variant.value = expression();
+                expect(TokenType::RightParen, "Expected ')' after variant value");
+            } else if (match(TokenType::Equal)) {
+                variant.value = expression();
+            }
+            node->variants.push_back(std::move(variant));
+        } while (match(TokenType::Comma));
+    }
+
+    expect(TokenType::RightBrace, "Expected '}' after enum body");
+    match(TokenType::Semicolon);
+    return node;
 }
 
 ASTPtr Parser::await_statement() {
@@ -567,6 +613,7 @@ void Parser::synchronize() {
             case TokenType::Return: case TokenType::Break: case TokenType::Continue:
             case TokenType::Include: case TokenType::Await:
             case TokenType::Switch: case TokenType::Try: case TokenType::Throw:
+            case TokenType::Signal: case TokenType::Effect: case TokenType::Enum:
                 return;
             default: advance(); break;
         }

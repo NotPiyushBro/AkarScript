@@ -234,6 +234,60 @@ void register_builtins(VM& vm) {
         return Value(static_cast<double>(static_cast<unsigned char>(s[0])));
     });
 
+    // signal_value(signal_obj) - read a signal's value without dependency tracking
+    vm.define_native("signal_value", [](int argc, Value* argv) -> Value {
+        if (argc != 1 || !argv[0].is_signal()) return Value();
+        return argv[0].as_signal()->value;
+    });
+
+    // signal_set(signal_obj, value) - set a signal's value (triggers effects)
+    // Note: This is a native helper; prefer using `signal_name = value` syntax.
+    // This is mainly for programmatic signal manipulation from native code.
+
+    // ---- Profiling & Tracing ----
+
+    // profile_start() - enable profiling
+    vm.define_native("profile_start", [&vm](int, Value*) -> Value {
+        vm.profiler_.start_profiling();
+        return Value();
+    });
+
+    // profile_stop() - disable profiling
+    vm.define_native("profile_stop", [&vm](int, Value*) -> Value {
+        vm.profiler_.stop_profiling();
+        return Value();
+    });
+
+    // profile_report() - print profiling report to stderr
+    vm.define_native("profile_report", [&vm](int, Value*) -> Value {
+        vm.profiler_.print_profile_report();
+        return Value();
+    });
+
+    // profile_reset() - reset all profiling data
+    vm.define_native("profile_reset", [&vm](int, Value*) -> Value {
+        vm.profiler_.reset();
+        return Value();
+    });
+
+    // trace_start() - enable tracing (also enables profiling)
+    vm.define_native("trace_start", [&vm](int, Value*) -> Value {
+        vm.profiler_.start_tracing();
+        return Value();
+    });
+
+    // trace_stop() - disable tracing
+    vm.define_native("trace_stop", [&vm](int, Value*) -> Value {
+        vm.profiler_.stop_tracing();
+        return Value();
+    });
+
+    // trace_dump() - print trace log to stderr
+    vm.define_native("trace_dump", [&vm](int, Value*) -> Value {
+        vm.profiler_.print_trace_log();
+        return Value();
+    });
+
     // format(fmt, ...args) - basic string formatting: {} placeholders
     vm.define_native("format", [](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_string()) return Value();

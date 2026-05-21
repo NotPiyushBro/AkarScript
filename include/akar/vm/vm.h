@@ -3,8 +3,10 @@
 #include "akar/common/opcodes.h"
 #include "akar/vm/native.h"
 #include "akar/vm/object_file.h"
+#include "akar/vm/profiler.h"
 #include <unordered_map>
 #include <unordered_set>
+#include <deque>
 #include <string>
 #include <functional>
 
@@ -61,6 +63,11 @@ public:
     bool verbose_ = false;
     void set_verbose(bool v) { verbose_ = v; }
 
+    // Profiling & Tracing
+    Profiler profiler_;
+    void set_profiling(bool on) { if (on) profiler_.start_profiling(); else profiler_.stop_profiling(); }
+    void set_tracing(bool on) { if (on) profiler_.start_tracing(); else profiler_.stop_tracing(); }
+
     // GC
     void mark_roots();
     void collect_garbage();  // full synchronous GC (blocking)
@@ -87,6 +94,12 @@ public:
     // Skip native call on fiber resume (CALL handler checks this)
     bool skip_native_call_ = false;
     Value skip_native_result_;
+
+    // Signal/Effect tracking
+    ObjEffect* current_effect_ = nullptr;  // currently executing effect (for dependency tracking)
+    int effect_frame_depth_ = 0;           // frame depth when effect was entered
+    std::deque<ObjEffect*> effect_queue_; // effects to re-run after current instruction
+    uint16_t enum_type_counter_ = 0;      // global enum type ID counter
 
 private:
     InterpretResult run();

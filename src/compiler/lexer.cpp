@@ -37,6 +37,9 @@ const char* token_type_name(TokenType type) {
         case TokenType::Try: return "Try";
         case TokenType::Catch: return "Catch";
         case TokenType::Throw: return "Throw";
+        case TokenType::Signal: return "Signal";
+        case TokenType::Effect: return "Effect";
+        case TokenType::Enum: return "Enum";
         case TokenType::Plus: return "+";
         case TokenType::Minus: return "-";
         case TokenType::Star: return "*";
@@ -269,6 +272,9 @@ TokenType Lexer::identifier_type() const {
     if (text == "try") return TokenType::Try;
     if (text == "catch") return TokenType::Catch;
     if (text == "throw") return TokenType::Throw;
+    if (text == "signal") return TokenType::Signal;
+    if (text == "effect") return TokenType::Effect;
+    if (text == "enum") return TokenType::Enum;
     if (text == "true") return TokenType::True;
     if (text == "false") return TokenType::False;
     if (text == "nil") return TokenType::Nil;
