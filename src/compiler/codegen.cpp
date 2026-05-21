@@ -1535,7 +1535,7 @@ static int opcode_dest_reg(uint8_t op) {
         case Opcode::SIGNAL_CREATE: case Opcode::SIGNAL_GET:
         case Opcode::EFFECT_CREATE:
         case Opcode::ENUM_CREATE: case Opcode::ENUM_GET: case Opcode::ENUM_IS:
-        case Opcode::LOAD_IMM:
+        case Opcode::LOAD_IMM: case Opcode::ADD_IMM:
             return 0; // A is destination
         default:
             return -1; // doesn't write to A, or is a control flow op
@@ -1551,7 +1551,7 @@ static int opcode_src_regs(uint8_t op) {
         case Opcode::SIGNAL_GET: case Opcode::SIGNAL_CREATE:
         case Opcode::ITER_INIT: case Opcode::ITER_DONE:
         case Opcode::GET_UPVALUE: case Opcode::EFFECT_CREATE:
-        case Opcode::NEW_INSTANCE:
+        case Opcode::NEW_INSTANCE: case Opcode::ADD_IMM:
             return 2; // reads B only
         case Opcode::SET_LOCAL: case Opcode::SET_UPVALUE: case Opcode::SET_GLOBAL:
         case Opcode::PRINT: case Opcode::RETURN:
@@ -1652,7 +1652,44 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
         }
     }
 
-    // Pass 2: NOP compaction disabled — jump offset adjustment is complex
+    // Pass 2: Fuse LOAD_IMM + ADD → ADD_IMM
+    // Pattern: LOAD_IMM Rtemp, imm; ADD Rdest = Rsrc + Rtemp → ADD_IMM Rdest = Rsrc + imm
+    // This eliminates one opcode and one register for the common i = i + 1 pattern
+    for (size_t i = 0; i + 8 <= len; i += 4) {
+        if (bytecode[i] != op_byte(Opcode::LOAD_IMM)) continue;
+        uint8_t imm_dest = bytecode[i + 1];   // A of LOAD_IMM
+        uint8_t imm_value = bytecode[i + 2];  // B of LOAD_IMM (the immediate value)
+
+        // Check next instruction
+        size_t next = i + 4;
+        if (next + 4 > len) break;
+        if (bytecode[next] != op_byte(Opcode::ADD)) continue;
+
+        uint8_t add_a = bytecode[next + 1]; // A of ADD (destination)
+        uint8_t add_b = bytecode[next + 2]; // B of ADD (left operand)
+        uint8_t add_c = bytecode[next + 3]; // C of ADD (right operand)
+
+        // Check if the LOAD_IMM destination is used as an ADD operand
+        if (add_b == imm_dest) {
+            // Pattern: LOAD_IMM Rtemp, imm; ADD Rdest = Rtemp + Rsrc
+            // Fuse: ADD_IMM Rdest = Rsrc + imm
+            bytecode[next] = op_byte(Opcode::ADD_IMM);
+            bytecode[next + 1] = add_a;  // destination
+            bytecode[next + 2] = add_c;  // source (the other operand)
+            bytecode[next + 3] = imm_value; // immediate
+            bytecode[i] = op_byte(Opcode::NOP); // remove LOAD_IMM
+        } else if (add_c == imm_dest) {
+            // Pattern: LOAD_IMM Rtemp, imm; ADD Rdest = Rsrc + Rtemp
+            // Fuse: ADD_IMM Rdest = Rsrc + imm
+            bytecode[next] = op_byte(Opcode::ADD_IMM);
+            bytecode[next + 1] = add_a;  // destination
+            bytecode[next + 2] = add_b;  // source (the other operand)
+            bytecode[next + 3] = imm_value; // immediate
+            bytecode[i] = op_byte(Opcode::NOP); // remove LOAD_IMM
+        }
+    }
+
+    // Pass 1b: NOP compaction disabled — jump offset adjustment is complex
     // Dead MOVEs are replaced with NOPs which still dispatch but are very fast
     // (NOP handler just increments IP)
 }

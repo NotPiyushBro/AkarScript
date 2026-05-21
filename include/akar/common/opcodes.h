@@ -101,6 +101,7 @@ enum class Opcode : uint8_t {
 
     // Small integer inline encoding
     LOAD_IMM,       // A = B (immediate 8-bit value, 0-255) — no constant table lookup
+    ADD_IMM,        // A = R[B] + C (immediate 8-bit add) — fuses LOAD_IMM + ADD
 
     // Fiber/Coroutine
     FIBER_YIELD,    // yield R[A] from current fiber, resume value goes to R[A]
