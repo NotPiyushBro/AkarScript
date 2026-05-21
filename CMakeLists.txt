@@ -24,6 +24,16 @@ add_library(akar_core STATIC
     src/vm/profiler.cpp
     src/vm/jit.cpp
 )
+
+# JIT backends: compile the one matching the current architecture
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    target_sources(akar_core PRIVATE src/vm/jit_arm64.cpp)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    # Future: target_sources(akar_core PRIVATE src/vm/jit_x86_64.cpp)
+    message(STATUS "JIT: x86-64 backend not yet implemented")
+else()
+    message(STATUS "JIT: no backend for ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
 target_include_directories(akar_core PUBLIC include)
 
 # akar compiler CLI
