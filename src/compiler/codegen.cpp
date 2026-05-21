@@ -1584,11 +1584,29 @@ static int opcode_src_regs(uint8_t op) {
     }
 }
 
+// Returns true if the opcode uses BX as a signed jump offset
+static bool is_jump_opcode(uint8_t op) {
+    switch (static_cast<Opcode>(op)) {
+        case Opcode::JMP:
+        case Opcode::JMP_IF_FALSE:
+        case Opcode::JMP_IF_TRUE:
+        case Opcode::TRY_BEGIN:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Returns true if TRY_END uses BX as an unsigned skip offset
+static bool is_try_end(uint8_t op) {
+    return static_cast<Opcode>(op) == Opcode::TRY_END;
+}
+
 void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
     size_t len = bytecode.size();
+    if (len < 8) return; // nothing to optimize
 
-    // Pass 1: Fuse LOAD_IMM + ADD → ADD_IMM
-    // Pattern: LOAD_IMM Rtemp, imm; ADD Rdest = Rsrc + Rtemp → ADD_IMM Rdest = Rsrc + imm
+    // --- Pass 1: Fuse LOAD_IMM + ADD → ADD_IMM ---
     for (size_t i = 0; i + 8 <= len; i += 4) {
         if (bytecode[i] != op_byte(Opcode::LOAD_IMM)) continue;
         uint8_t imm_dest = bytecode[i + 1];
@@ -1617,8 +1635,7 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
         }
     }
 
-    // Pass 2: Fuse compare + branch → JMP_IF_NOT_LT/LTE/GT/GTE/EQ
-    // Pattern: LT R3=R2,R0; JMP_IF_FALSE R3 +offset → JMP_IF_NOT_LT R2,R0,adjusted_offset
+    // --- Pass 2: Fuse compare + branch → JMP_IF_NOT_LT/LTE/GT/GTE/EQ ---
     for (size_t i = 0; i + 8 <= len; i += 4) {
         uint8_t op = bytecode[i];
         Opcode cmp_op = static_cast<Opcode>(op);
@@ -1635,11 +1652,8 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
         if (bytecode[next] != op_byte(Opcode::JMP_IF_FALSE)) continue;
         if (bytecode[next + 1] != cmp_a) continue;
 
-        // Original offset is relative to JMP_IF_FALSE at position `next`
         int16_t old_offset = static_cast<int16_t>((bytecode[next + 2] << 8) | bytecode[next + 3]);
-        // Target absolute position
         int target = static_cast<int>(next) + 4 + old_offset;
-        // New offset relative to the fused instruction at position `i`
         int new_offset = target - static_cast<int>(i) - 4;
         if (new_offset < -128 || new_offset > 127) continue;
 
@@ -1659,6 +1673,83 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
         bytecode[i + 3] = static_cast<uint8_t>(new_offset & 0xFF);
         bytecode[next] = op_byte(Opcode::NOP);
     }
+
+    // --- Pass 3: Compact — remove NOPs and fix all jump offsets ---
+    // Count NOPs
+    size_t nop_count = 0;
+    for (size_t i = 0; i < len; i += 4) {
+        if (bytecode[i] == op_byte(Opcode::NOP)) nop_count++;
+    }
+    if (nop_count == 0) return; // nothing to compact
+
+    // Build old_offset → new_offset mapping
+    std::vector<size_t> old_to_new(len, 0);
+    size_t new_pos = 0;
+    for (size_t i = 0; i < len; i += 4) {
+        old_to_new[i] = new_pos;
+        if (bytecode[i] != op_byte(Opcode::NOP)) {
+            new_pos += 4;
+        }
+    }
+
+    // Fix jump offsets BEFORE compacting (adjust offsets using the mapping)
+    for (size_t i = 0; i < len; i += 4) {
+        if (bytecode[i] == op_byte(Opcode::NOP)) continue;
+        uint8_t op = bytecode[i];
+
+        if (is_jump_opcode(op)) {
+            int16_t old_offset = static_cast<int16_t>((bytecode[i + 2] << 8) | bytecode[i + 3]);
+            size_t old_target = static_cast<size_t>(static_cast<int64_t>(i) + 4 + old_offset);
+            if (old_target < len) {
+                size_t new_target = old_to_new[old_target];
+                size_t new_source = old_to_new[i];
+                int16_t new_offset = static_cast<int16_t>(new_target - new_source - 4);
+                bytecode[i + 2] = (new_offset >> 8) & 0xFF;
+                bytecode[i + 3] = new_offset & 0xFF;
+            }
+        } else if (is_try_end(op)) {
+            int16_t old_offset = static_cast<int16_t>((bytecode[i + 2] << 8) | bytecode[i + 3]);
+            if (old_offset > 0) {
+                size_t old_target = static_cast<size_t>(static_cast<int64_t>(i) + 4 + old_offset);
+                if (old_target < len) {
+                    size_t new_target = old_to_new[old_target];
+                    size_t new_source = old_to_new[i];
+                    int16_t new_offset = static_cast<int16_t>(new_target - new_source - 4);
+                    bytecode[i + 2] = (new_offset >> 8) & 0xFF;
+                    bytecode[i + 3] = new_offset & 0xFF;
+                }
+            }
+        }
+        // Also handle fused compare-branch opcodes (8-bit signed offset)
+        if (op == op_byte(Opcode::JMP_IF_NOT_LT) || op == op_byte(Opcode::JMP_IF_NOT_LTE) ||
+            op == op_byte(Opcode::JMP_IF_NOT_GT) || op == op_byte(Opcode::JMP_IF_NOT_GTE) ||
+            op == op_byte(Opcode::JMP_IF_NOT_EQ)) {
+            int8_t old_offset = static_cast<int8_t>(bytecode[i + 3]);
+            size_t old_target = static_cast<size_t>(static_cast<int64_t>(i) + 4 + old_offset);
+            if (old_target < len) {
+                size_t new_target = old_to_new[old_target];
+                size_t new_source = old_to_new[i];
+                int new_offset = static_cast<int>(new_target) - static_cast<int>(new_source) - 4;
+                if (new_offset >= -128 && new_offset <= 127) {
+                    bytecode[i + 3] = static_cast<uint8_t>(new_offset & 0xFF);
+                }
+            }
+        }
+    }
+
+    // Compact: remove NOPs
+    std::vector<uint8_t> compacted;
+    compacted.reserve(new_pos);
+    for (size_t i = 0; i < len; i += 4) {
+        if (bytecode[i] != op_byte(Opcode::NOP)) {
+            compacted.push_back(bytecode[i]);
+            compacted.push_back(bytecode[i + 1]);
+            compacted.push_back(bytecode[i + 2]);
+            compacted.push_back(bytecode[i + 3]);
+        }
+    }
+
+    bytecode = std::move(compacted);
 }
 
 } // namespace akar
