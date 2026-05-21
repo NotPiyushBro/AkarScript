@@ -346,6 +346,39 @@ let name = input("Enter name: ")
 print("Hello, " + name)
 ```
 
+## Profiling & Tracing
+
+See [Profiling & Tracing](profiling.md) for full documentation.
+
+### `profile_start()` / `profile_stop()`
+
+Enable/disable profiling.
+
+### `profile_report()`
+
+Print profile report to stderr.
+
+### `profile_reset()`
+
+Clear all collected profiling data.
+
+### `trace_start()` / `trace_stop()`
+
+Enable/disable event tracing.
+
+### `trace_dump()`
+
+Print trace log to stderr.
+
+### `signal_value(sig)`
+
+Read a signal's value without triggering dependency tracking. Useful for reading signal values in non-effect contexts.
+
+```akar
+signal x = 10
+let val = signal_value(x)  // reads x without registering dependency
+```
+
 ## Program Control
 
 ### `exit(code?)`

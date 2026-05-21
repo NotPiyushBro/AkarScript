@@ -71,6 +71,9 @@ Akar has these types:
 | `class` | `class Foo { }` | Class definition |
 | `instance` | `Foo()` | Class instance |
 | `fiber` | `fiber_create(fn)` | Coroutine |
+| `signal` | `signal x = 10` | Reactive variable |
+| `effect` | `effect { ... }` | Reactive side-effect block |
+| `enum value` | `Color.Red` | NaN-boxed enum variant |
 
 ### Type Checking
 
@@ -540,6 +543,104 @@ let result = await some_async_value
 
 If the value is `nil`, execution suspends (used with fibers).
 
+## Enums
+
+Enums define a type with a fixed set of named variants. Simple variants are NaN-boxed into the value itself — no heap allocation, no GC pressure, instant comparison.
+
+### Simple Enums
+
+```akar
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+
+let dir = Direction.North
+print(dir)                    // <enum #0:0>
+print(dir == Direction.North) // true
+print(dir == Direction.South) // false
+```
+
+### Multiple Enum Types
+
+Each enum type gets a unique internal ID. Different types are always unequal:
+
+```akar
+enum Color { Red, Green, Blue }
+enum Priority { Low, Medium, High }
+
+let c = Color.Red
+let p = Priority.High
+print(c == p)  // false — different types, even though both are "first" variant
+```
+
+### Enums in Control Flow
+
+```akar
+enum GameState { Menu, Playing, Paused, GameOver }
+
+let state = GameState.Menu
+
+if (state == GameState.Playing) {
+    print("Game is running")
+} else if (state == GameState.Paused) {
+    print("Game is paused")
+}
+```
+
+### Enums with Signals
+
+Enums are often used with signals for reactive state machines:
+
+```akar
+enum GameState { Menu, Playing, Paused, GameOver }
+signal state = GameState.Menu
+
+effect {
+    if (state == GameState.Menu) {
+        show_menu()
+    } else if (state == GameState.Playing) {
+        hide_menu()
+    } else if (state == GameState.GameOver) {
+        show_death_screen()
+    }
+}
+
+state = GameState.Playing  // automatically hides menu
+```
+
+### Performance
+
+- Simple enum values are **8 bytes, NaN-boxed** — no heap allocation
+- Comparison is a single `bits == bits` check (faster than string comparison)
+- Zero GC pressure — enum values are immediate, not heap objects
+
+## Reactive Signals & Effects
+
+See [Reactive Signals & Effects](reactive.md) for full documentation.
+
+```akar
+signal health = 100
+
+effect {
+    print("Health: " + to_string(health))
+}
+
+health = 80   // automatically prints "Health: 80"
+```
+
+## Profiling & Tracing
+
+See [Profiling & Tracing](profiling.md) for full documentation.
+
+```akar
+profile_start()
+// ... your code ...
+profile_report()
+```
+
 ## Fibers (Coroutines)
 
 See [Standard Library - Fibers](stdlib.md#fibers) for details.
@@ -582,4 +683,5 @@ From highest to lowest:
 let fn if else while for in return break continue
 class this super new and or not include await
 switch case default try catch throw true false nil
+signal effect enum
 ```

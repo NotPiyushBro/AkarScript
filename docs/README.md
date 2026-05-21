@@ -6,8 +6,10 @@ Akar Script is a fast, embeddable scripting language designed for game engines a
 
 | Document | Description |
 |----------|-------------|
-| [Language Reference](language.md) | Syntax, types, control flow, classes, closures |
+| [Language Reference](language.md) | Syntax, types, control flow, classes, closures, enums |
+| [Reactive Signals & Effects](reactive.md) | Built-in reactive state management |
 | [Standard Library](stdlib.md) | Built-in functions, math, strings, arrays, maps, fibers |
+| [Profiling & Tracing](profiling.md) | Built-in profiler, tracer, performance analysis |
 | [C/C++ Embedding API](api.md) | How to embed Akar in your C/C++ application |
 | [Operator Overloading](operators.md) | Magic methods for custom types |
 | [VM Internals](vm.md) | Bytecode format, opcodes, GC, performance |
