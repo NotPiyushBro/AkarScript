@@ -229,7 +229,7 @@ void CodeGenerator::compile_stmt(const ASTPtr& node) {
         case NodeType::ThrowStmt: compile_throw(static_cast<ThrowStmt*>(node.get())); break;
         default:
             // Treat as expression
-            { int r = compile_expr(node); free_register(); }
+            { compile_expr(node); free_register(); }
             break;
     }
 }
@@ -317,17 +317,64 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
         auto* left_bin = static_cast<BinaryExpr*>(node->left.get());
         auto* right_num = static_cast<NumberLiteral*>(node->right.get());
         if (left_bin->op == "%" && right_num->value == 0.0) {
-            int mod_left = compile_expr(left_bin->left);
-            int mod_right = compile_expr(left_bin->right);
+            // Optimize: use local registers directly for MOD_EQ_ZERO operands
+            int mod_left;
+            bool ml_local = false;
+            if (left_bin->left->type == NodeType::Identifier) {
+                auto* id = static_cast<Identifier*>(left_bin->left.get());
+                int local = resolve_local(id->name);
+                if (local >= 0) { mod_left = local; ml_local = true; }
+                else mod_left = compile_expr(left_bin->left);
+            } else {
+                mod_left = compile_expr(left_bin->left);
+            }
+            int mod_right;
+            bool mr_local = false;
+            if (left_bin->right->type == NodeType::Identifier) {
+                auto* id = static_cast<Identifier*>(left_bin->right.get());
+                int local = resolve_local(id->name);
+                if (local >= 0) { mod_right = local; mr_local = true; }
+                else mod_right = compile_expr(left_bin->right);
+            } else {
+                mod_right = compile_expr(left_bin->right);
+            }
             emit(op_byte(Opcode::MOD_EQ_ZERO), reg, mod_left, mod_right);
-            free_register(); // mod_right
-            free_register(); // mod_left
+            if (!mr_local) free_register();
+            if (!ml_local) free_register();
             return;
         }
     }
 
-    int left = compile_expr(node->left);
-    int right = compile_expr(node->right);
+    // Optimization: use local registers directly instead of allocating temps + MOVEs
+    int left;
+    bool left_is_local = false;
+    if (node->left->type == NodeType::Identifier) {
+        auto* id = static_cast<Identifier*>(node->left.get());
+        int local = resolve_local(id->name);
+        if (local >= 0) {
+            left = local;
+            left_is_local = true;
+        } else {
+            left = compile_expr(node->left);
+        }
+    } else {
+        left = compile_expr(node->left);
+    }
+
+    int right;
+    bool right_is_local = false;
+    if (node->right->type == NodeType::Identifier) {
+        auto* id = static_cast<Identifier*>(node->right.get());
+        int local = resolve_local(id->name);
+        if (local >= 0) {
+            right = local;
+            right_is_local = true;
+        } else {
+            right = compile_expr(node->right);
+        }
+    } else {
+        right = compile_expr(node->right);
+    }
 
     Opcode op;
     if (node->op == "+") op = Opcode::ADD;
@@ -344,8 +391,8 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
     else throw std::runtime_error("Unknown binary operator: " + node->op);
 
     emit(op_byte(op), reg, left, right);
-    free_register(); // right
-    free_register(); // left
+    if (!right_is_local) free_register();
+    if (!left_is_local) free_register();
 }
 
 void CodeGenerator::compile_unary(UnaryExpr* node, int reg) {
@@ -388,14 +435,27 @@ void CodeGenerator::compile_call(CallExpr* node, int reg) {
         int object_reg = compile_expr(field->object);
         uint16_t method_const = make_identifier_constant(field->field);
         int callee = alloc_register();
-        emit(op_byte(Opcode::GET_FIELD), callee, object_reg, method_const);
+        // Allocate register for "this" arg so arg compilation doesn't reuse it
+        int this_slot = alloc_register();
 
+        // Move object to this_slot
+        if (object_reg != this_slot) {
+            emit(op_byte(Opcode::MOVE), this_slot, object_reg, 0);
+        }
+
+        // Compile user args (they'll be allocated at this_slot+1, this_slot+2, ...)
         std::vector<int> arg_regs;
-        arg_regs.push_back(object_reg); // "this" is first arg
+        arg_regs.push_back(this_slot); // "this" is first arg
         for (auto& arg : node->arguments) {
             arg_regs.push_back(compile_expr(arg));
         }
-        for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
+
+        // Emit GET_FIELD: reads from this_slot (which has the object),
+        // writes method closure to callee.
+        emit(op_byte(Opcode::GET_FIELD), callee, this_slot, method_const);
+
+        // Move remaining args into position (skip i=0 which is already at this_slot)
+        for (int i = 1; i < static_cast<int>(arg_regs.size()); i++) {
             int target = callee + 1 + i;
             if (arg_regs[i] != target) {
                 emit(op_byte(Opcode::MOVE), target, arg_regs[i], 0);
@@ -415,13 +475,12 @@ void CodeGenerator::compile_call(CallExpr* node, int reg) {
             arg_regs.push_back(compile_expr(arg));
         }
         int call_callee = callee;
-        bool used_temp_callee = false;
         if (callee > 255) {
             call_callee = alloc_register();
             emit(op_byte(Opcode::MOVE), call_callee, callee, 0);
-            used_temp_callee = true;
         }
-        for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
+        // Move args left-to-right to avoid clobbering source registers
+        for (int i = 0; i < static_cast<int>(arg_regs.size()); i++) {
             int target = call_callee + 1 + i;
             if (arg_regs[i] != target) {
                 emit(op_byte(Opcode::MOVE), target, arg_regs[i], 0);
@@ -463,6 +522,42 @@ void CodeGenerator::compile_field_set(FieldSetExpr* node, int reg) {
 }
 
 void CodeGenerator::compile_assignment(AssignmentExpr* node, int reg) {
+    // Peephole: local = local op expr → emit op directly to local register
+    // Eliminates 2 MOVEs: one for the temp result, one for the assignment
+    if (node->value->type == NodeType::Binary) {
+        auto* bin = static_cast<BinaryExpr*>(node->value.get());
+        int local = resolve_local(node->name);
+        if (local >= 0 && bin->left->type == NodeType::Identifier) {
+            auto* left_id = static_cast<Identifier*>(bin->left.get());
+            if (resolve_local(left_id->name) == local) {
+                // Pattern: local = local op expr
+                int right;
+                bool right_is_local = false;
+                if (bin->right->type == NodeType::Identifier) {
+                    auto* right_id = static_cast<Identifier*>(bin->right.get());
+                    int rlocal = resolve_local(right_id->name);
+                    if (rlocal >= 0) { right = rlocal; right_is_local = true; }
+                    else right = compile_expr(bin->right);
+                } else {
+                    right = compile_expr(bin->right);
+                }
+                Opcode op;
+                if (bin->op == "+") op = Opcode::ADD;
+                else if (bin->op == "-") op = Opcode::SUB;
+                else if (bin->op == "*") op = Opcode::MUL;
+                else if (bin->op == "/") op = Opcode::DIV;
+                else if (bin->op == "%") op = Opcode::MOD;
+                else goto fallback;
+                // Emit: OP local, local, right (in-place update)
+                emit(op_byte(op), local, local, right);
+                if (!right_is_local) free_register();
+                // Assignment result is the local value
+                if (reg != local) emit(op_byte(Opcode::MOVE), reg, local, 0);
+                return;
+            }
+        }
+    }
+fallback:
     int val = compile_expr(node->value);
     int local = resolve_local(node->name);
     if (local >= 0) {
@@ -507,9 +602,15 @@ void CodeGenerator::compile_this(ThisExpr*, int reg) {
     int local = resolve_local("this");
     if (local >= 0) {
         emit(op_byte(Opcode::MOVE), reg, local, 0);
-    } else {
-        emit(op_byte(Opcode::LOAD_NIL), reg, 0, 0);
+        return;
     }
+    // this captured as upvalue (closure inside a method)
+    int upvalue = resolve_upvalue("this");
+    if (upvalue >= 0) {
+        emit(op_byte(Opcode::GET_UPVALUE), reg, upvalue, 0);
+        return;
+    }
+    emit(op_byte(Opcode::LOAD_NIL), reg, 0, 0);
 }
 
 void CodeGenerator::compile_super(SuperAccessExpr*, int reg) {
@@ -519,7 +620,7 @@ void CodeGenerator::compile_super(SuperAccessExpr*, int reg) {
 
 // Statements
 void CodeGenerator::compile_expr_stmt(ExprStmt* node) {
-    int reg = compile_expr(node->expression);
+    compile_expr(node->expression);
     free_register(); // result not needed
 }
 
@@ -606,7 +707,7 @@ void CodeGenerator::compile_for(ForStmt* node) {
     // Continue target: the update expression
     size_t continue_target = current_offset();
     if (node->update) {
-        int r = compile_expr(node->update);
+        compile_expr(node->update);
         free_register();
     }
 
@@ -722,7 +823,8 @@ void CodeGenerator::compile_return(ReturnStmt* node) {
                 for (auto& arg : call_node->arguments) {
                     arg_regs.push_back(compile_expr(arg));
                 }
-                for (int i = static_cast<int>(arg_regs.size()) - 1; i >= 0; i--) {
+                // Move args left-to-right to avoid clobbering source registers
+                for (int i = 0; i < static_cast<int>(arg_regs.size()); i++) {
                     int target = callee + 1 + i;
                     if (arg_regs[i] != target) {
                         emit(op_byte(Opcode::MOVE), target, arg_regs[i], 0);
@@ -784,19 +886,36 @@ void CodeGenerator::compile_let(LetStmt* node) {
 }
 
 void CodeGenerator::compile_fn(FnStmt* node) {
+    // For named local functions, declare the name first so recursive
+    // references inside the body can resolve it as a local.
+    int reg = -1;
+    bool is_local_named = !node->name.empty() &&
+        !(current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0);
+    if (is_local_named) {
+        reg = alloc_register();
+        emit(op_byte(Opcode::LOAD_NIL), reg, 0, 0); // placeholder
+        declare_local(node->name, reg);
+    }
+
     auto* func = compile_function(node->name, node->params, node->body);
     uint16_t func_const = make_constant(Value(static_cast<Obj*>(func)));
-    int reg = alloc_register();
-    emit_bx(op_byte(Opcode::CLOSURE), reg, func_const);
+
+    if (is_local_named) {
+        // Reuse the already-allocated register for the closure
+        emit_bx(op_byte(Opcode::CLOSURE), reg, func_const);
+    } else {
+        reg = alloc_register();
+        emit_bx(op_byte(Opcode::CLOSURE), reg, func_const);
+    }
+
     if (!node->name.empty()) {
         // At top level, set as global
         if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
             uint16_t name_const = make_identifier_constant(node->name);
             emit_bx(op_byte(Opcode::SET_GLOBAL), reg, name_const);
             free_register();
-        } else {
-            declare_local(node->name, reg);
         }
+        // else: already declared as local above
     }
 }
 
@@ -840,14 +959,33 @@ void CodeGenerator::compile_await(AwaitStmt* node) {
 
 void CodeGenerator::compile_destructuring(DestructuringStmt* node) {
     int init_reg = compile_expr(node->initializer);
+
+    // Get array length once (allocate AFTER init_reg to keep LIFO order)
+    int len_reg = alloc_register();
+    emit(op_byte(Opcode::GET_FIELD), len_reg, init_reg,
+         make_identifier_constant("length"));
+
     for (size_t i = 0; i < node->names.size(); i++) {
+        // Allocate register for the value (will become a local)
+        int val_reg = alloc_register();
+
+        // Default to nil (covers out-of-bounds case)
+        emit(op_byte(Opcode::LOAD_NIL), val_reg, 0, 0);
+
+        // Bounds check: if i < length, overwrite with arr[i]
         int idx_reg = alloc_register();
         uint16_t idx_const = make_constant(Value(static_cast<double>(i)));
         emit_bx(op_byte(Opcode::LOAD_CONST), idx_reg, idx_const);
-        int val_reg = alloc_register();
+        int cmp_reg = alloc_register();
+        emit(op_byte(Opcode::LT), cmp_reg, idx_reg, len_reg);
+        size_t skip_jump = emit_jump(op_byte(Opcode::JMP_IF_FALSE), cmp_reg, 0);
+        // In bounds: GET_INDEX overwrites val_reg
         emit(op_byte(Opcode::GET_INDEX), val_reg, init_reg, idx_reg);
-        free_register(); // idx_reg (N) — val_reg (N+1) stays
-        // Declare as local or set as global
+        patch_jump(skip_jump, static_cast<int16_t>(current_offset() - skip_jump - INST_SIZE));
+        free_register(); // cmp_reg
+        free_register(); // idx_reg
+
+        // Declare the name (val_reg stays allocated as a local)
         if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
             uint16_t name_const = make_identifier_constant(node->names[i]);
             emit_bx(op_byte(Opcode::SET_GLOBAL), val_reg, name_const);
@@ -857,7 +995,10 @@ void CodeGenerator::compile_destructuring(DestructuringStmt* node) {
             // val_reg is now owned by the local, don't free
         }
     }
-    free_register(); // init_reg
+    // Note: len_reg and init_reg are NOT freed here because locals were
+    // allocated at higher registers. They're accounted for in max_registers.
+    (void)len_reg;
+    (void)init_reg;
 }
 
 void CodeGenerator::compile_switch(SwitchStmt* node) {

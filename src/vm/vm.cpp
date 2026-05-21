@@ -219,32 +219,6 @@ InterpretResult VM::run() {
     // Helper to get IP offset from bytecode start
     #define IP_OFFSET() (int)(ip - frame->closure->function->bytecode.data())
 
-    // Opcode name table for verbose output
-    static const char* opcode_names[] = {
-        "LOAD_CONST", "LOAD_NIL", "LOAD_TRUE", "LOAD_FALSE",
-        "MOVE", "GET_LOCAL", "SET_LOCAL", "GET_UPVALUE", "SET_UPVALUE",
-        "GET_GLOBAL", "SET_GLOBAL",
-        "ADD", "SUB", "MUL", "DIV", "MOD", "NEG",
-        "EQ", "NEQ", "LT", "LTE", "GT", "GTE", "NOT",
-        "JMP", "JMP_IF_FALSE", "JMP_IF_TRUE",
-        "CALL", "CLOSURE", "CLOSE_UPVALUE", "RETURN",
-        "NEW_ARRAY", "NEW_MAP", "GET_INDEX", "SET_INDEX",
-        "GET_FIELD", "SET_FIELD",
-        "NEW_CLASS", "NEW_INSTANCE", "GET_METHOD", "INVOKE",
-        "NEW_RANGE", "ITER_INIT", "ITER_NEXT", "ITER_DONE",
-        "PRINT", "HALT", "NOP",
-        "FIBER_YIELD", "FIBER_RESUME", "TAIL_CALL",
-        "AWAIT", "THROW", "TRY_BEGIN", "TRY_END",
-        "WIDE",
-        // Quickened opcodes
-        "ADD_NUM", "SUB_NUM", "MUL_NUM", "DIV_NUM", "MOD_NUM", "ADD_STR",
-        "EQ_NUM", "NEQ_NUM", "LT_NUM", "LTE_NUM", "GT_NUM", "GTE_NUM",
-        "MOD_EQ_ZERO",
-        "FIBER_YIELD", "FIBER_RESUME", "TAIL_CALL",
-        "AWAIT", "THROW", "TRY_BEGIN", "TRY_END",
-        "WIDE",
-    };
-
 #ifdef __GNUC__
     // Computed goto dispatch table
     static const void* dispatch_table[] = {
@@ -274,14 +248,6 @@ InterpretResult VM::run() {
     };
 
     #define DISPATCH() do { \
-        goto *dispatch_table[ip[0]]; \
-    } while(0)
-    #define DISPATCH_VERBOSE() do { \
-        if (yield_pending_) HANDLE_FIBER_YIELD(); \
-        CHECK_MEMORY_LIMIT(); \
-        VLOG("[VM] ip=%d %s a=%d b=%d c=%d base=%d top=%d frames=%d\n", \
-             IP_OFFSET(), opcode_names[ip[0]], ip[1], ip[2], ip[3], \
-             base, stack_top_, frame_count_); \
         goto *dispatch_table[ip[0]]; \
     } while(0)
     #define CASE(op) op_##op
@@ -458,7 +424,9 @@ InterpretResult VM::run() {
     }
     CASE(DIV_NUM): {
         uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
-        S(a) = Value(S(b).get_number() / S(c).get_number());
+        double divisor = S(c).get_number();
+        if (__builtin_expect(divisor == 0, 0)) { runtime_error("Division by zero"); RETURN_RUNTIME_ERROR; }
+        S(a) = Value(S(b).get_number() / divisor);
         DISPATCH();
     }
     CASE(MOD): {
@@ -1021,10 +989,7 @@ InterpretResult VM::run() {
         uint8_t a = ip[1];
         ip += 4;
         Value exception = S(a);
-        std::string msg;
-        if (exception.is_string()) msg = exception.as_string()->value;
-        else if (exception.is_number()) msg = std::to_string(exception.get_number());
-        else msg = "thrown exception";
+        std::string msg = exception.to_string();
         if (try_count_ > 0) {
             TryFrame& tf = try_frames_[--try_count_];
             while (frame_count_ > tf.frame_count) {
@@ -1151,6 +1116,7 @@ InterpretResult VM::run() {
             }
             auto& elems = obj.as_array()->elements;
             int i = static_cast<int>(idx.get_number());
+            if (i < 0) i += (int)elems.size();
             if (i < 0) {
                 runtime_error("Array index out of bounds");
                 RETURN_RUNTIME_ERROR;
@@ -1739,6 +1705,7 @@ InterpretResult VM::run() {
                     if (!idx.is_number()) { runtime_error("Array index must be a number"); RETURN_RUNTIME_ERROR; }
                     auto& elems = obj.as_array()->elements;
                     int i = static_cast<int>(idx.get_number());
+                    if (i < 0) i += (int)elems.size();
                     if (i < 0) { runtime_error("Array index out of bounds"); RETURN_RUNTIME_ERROR; }
                     if (i >= (int)elems.size()) elems.resize(i + 1);
                     elems[i] = val;
@@ -2122,10 +2089,7 @@ InterpretResult VM::run() {
             }
             case Opcode::THROW: {
                 Value exception = S(wa);
-                std::string msg;
-                if (exception.is_string()) msg = exception.as_string()->value;
-                else if (exception.is_number()) msg = std::to_string(exception.get_number());
-                else msg = "thrown exception";
+                std::string msg = exception.to_string();
                 if (try_count_ > 0) {
                     TryFrame& tf = try_frames_[--try_count_];
                     while (frame_count_ > tf.frame_count) {
@@ -2252,6 +2216,10 @@ Value VM::call_function(ObjClosure* closure, const std::vector<Value>& args) {
     }
 
     auto result = run();
+    if (result != InterpretResult::Ok) {
+        stack_top_ = saved_top;
+        return Value();
+    }
     Value ret = stack_[stack_top_ - 1];
     stack_top_ = saved_top;
     return ret;
@@ -2315,7 +2283,7 @@ bool VM::call(ObjClosure* closure, int arg_count, int return_reg, int callee_abs
     return true;
 }
 
-bool VM::call_native(ObjNative* native, int arg_count, int return_reg, int callee_abs) {
+bool VM::call_native(ObjNative* native, int arg_count, int /*return_reg*/, int callee_abs) {
     Value* args = &stack_[callee_abs + 1];
     Value result = native->function(arg_count, args);
     stack_top_ = callee_abs;
@@ -2379,10 +2347,10 @@ void VM::runtime_error(const char* format, ...) {
 
     // Print stack trace
     for (int i = frame_count_ - 1; i >= 0; i--) {
-        auto* frame = &frames_[i];
-        auto* func = frame->closure->function;
-        size_t offset = frame->ip - func->bytecode.data();
-        fprintf(stderr, "  [line %d] in %s\n", func->line, func->name.c_str());
+        auto* fr = &frames_[i];
+        auto* func = fr->closure->function;
+        size_t offset = fr->ip - func->bytecode.data();
+        fprintf(stderr, "  [line %d] in %s (ip=%zu)\n", func->line, func->name.c_str(), offset);
     }
     fprintf(stderr, "Error: %s\n", buf);
 }

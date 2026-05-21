@@ -8,6 +8,7 @@
 #include <chrono>
 #include <thread>
 #include <cstring>
+#include <random>
 
 namespace akar {
 
@@ -141,10 +142,10 @@ void register_builtins(VM& vm) {
     });
 
     // random()
-    vm.define_native("random", [](int argc, Value*) -> Value {
-        static bool seeded = false;
-        if (!seeded) { std::srand(std::time(nullptr)); seeded = true; }
-        return Value(static_cast<double>(std::rand()) / RAND_MAX);
+    vm.define_native("random", [](int, Value*) -> Value {
+        static std::mt19937 rng(std::random_device{}());
+        static std::uniform_real_distribution<double> dist(0.0, 1.0);
+        return Value(dist(rng));
     });
 
     // floor(x)
@@ -172,12 +173,12 @@ void register_builtins(VM& vm) {
     });
 
     // clock() - returns CPU time in seconds
-    vm.define_native("clock", [](int argc, Value*) -> Value {
+    vm.define_native("clock", [](int, Value*) -> Value {
         return Value(static_cast<double>(std::clock()) / CLOCKS_PER_SEC);
     });
 
     // time() - returns current Unix timestamp in seconds (with fractional precision)
-    vm.define_native("time", [](int argc, Value*) -> Value {
+    vm.define_native("time", [](int, Value*) -> Value {
         auto now = std::chrono::system_clock::now();
         auto duration = now.time_since_epoch();
         double seconds = std::chrono::duration<double>(duration).count();
@@ -247,7 +248,7 @@ void register_builtins(VM& vm) {
                 result += '}';
                 pos += 2;
             } else if (fmt[pos] == '{' && pos + 1 < fmt.size() && fmt[pos + 1] == '}') {
-                if (arg_idx < argc) {
+                if (arg_idx < static_cast<size_t>(argc)) {
                     result += argv[arg_idx].to_string();
                     arg_idx++;
                 }
