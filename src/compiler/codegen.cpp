@@ -1587,111 +1587,78 @@ static int opcode_src_regs(uint8_t op) {
 void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
     size_t len = bytecode.size();
 
-    // Pass 1: Dead MOVE elimination (forward scan)
-    // A MOVE A, B is dead if A is overwritten before being read,
-    // scanning forward until we hit a JMP or find a read of A.
-    for (size_t i = 0; i + 4 <= len; i += 4) {
-        uint8_t op = bytecode[i];
-        if (op != op_byte(Opcode::MOVE)) continue;
-        uint8_t move_dest = bytecode[i + 1]; // A operand
-
-        // Scan forward from the next instruction
-        bool dead = false;
-        for (size_t j = i + 4; j + 4 <= len; j += 4) {
-            uint8_t scan_op = bytecode[j];
-            if (scan_op == op_byte(Opcode::WIDE)) break; // can't analyze wide
-            // Control flow — can't determine, keep MOVE for safety
-            if (scan_op == op_byte(Opcode::JMP_IF_FALSE) ||
-                scan_op == op_byte(Opcode::JMP_IF_TRUE) ||
-                scan_op == op_byte(Opcode::RETURN) ||
-                scan_op == op_byte(Opcode::HALT) ||
-                scan_op == op_byte(Opcode::CALL) ||
-                scan_op == op_byte(Opcode::TAIL_CALL)) {
-                break;
-            }
-            // Backward JMP (loop back-edge): check if jump target overwrites MOVE dest
-            if (scan_op == op_byte(Opcode::JMP)) {
-                int16_t jmp_offset = static_cast<int16_t>((bytecode[j + 2] << 8) | bytecode[j + 3]);
-                if (jmp_offset < 0) {
-                    size_t target = static_cast<size_t>(static_cast<int64_t>(j) + 4 + jmp_offset);
-                    if (target + 4 <= len) {
-                        // Check if the instruction at the jump target overwrites MOVE dest
-                        uint8_t target_op = bytecode[target];
-                        int target_dest = opcode_dest_reg(target_op);
-                        if (target_dest >= 0 && bytecode[target + 1 + target_dest] == move_dest) {
-                            dead = true;
-                        }
-                    }
-                }
-                break; // can't scan past any JMP
-            }
-
-            int dest = opcode_dest_reg(scan_op);
-            int srcs = opcode_src_regs(scan_op);
-
-            // Check if this instruction reads the MOVE destination (A, B, or C)
-            if (srcs & 1) {
-                if (bytecode[j + 1] == move_dest) break; // reads A
-            }
-            if (srcs & 2) {
-                if (bytecode[j + 2] == move_dest) break; // reads B
-            }
-            if (srcs & 4) {
-                if (bytecode[j + 3] == move_dest) break; // reads C
-            }
-
-            // Check if this instruction overwrites the MOVE destination
-            if (dest >= 0 && bytecode[j + 1 + dest] == move_dest) {
-                dead = true; // overwritten before being read — MOVE is dead
-                break;
-            }
-        }
-
-        if (dead) {
-            bytecode[i] = op_byte(Opcode::NOP);
-        }
-    }
-
-    // Pass 2: Fuse LOAD_IMM + ADD → ADD_IMM
+    // Pass 1: Fuse LOAD_IMM + ADD → ADD_IMM
     // Pattern: LOAD_IMM Rtemp, imm; ADD Rdest = Rsrc + Rtemp → ADD_IMM Rdest = Rsrc + imm
-    // This eliminates one opcode and one register for the common i = i + 1 pattern
     for (size_t i = 0; i + 8 <= len; i += 4) {
         if (bytecode[i] != op_byte(Opcode::LOAD_IMM)) continue;
-        uint8_t imm_dest = bytecode[i + 1];   // A of LOAD_IMM
-        uint8_t imm_value = bytecode[i + 2];  // B of LOAD_IMM (the immediate value)
+        uint8_t imm_dest = bytecode[i + 1];
+        uint8_t imm_value = bytecode[i + 2];
 
-        // Check next instruction
         size_t next = i + 4;
         if (next + 4 > len) break;
         if (bytecode[next] != op_byte(Opcode::ADD)) continue;
 
-        uint8_t add_a = bytecode[next + 1]; // A of ADD (destination)
-        uint8_t add_b = bytecode[next + 2]; // B of ADD (left operand)
-        uint8_t add_c = bytecode[next + 3]; // C of ADD (right operand)
+        uint8_t add_a = bytecode[next + 1];
+        uint8_t add_b = bytecode[next + 2];
+        uint8_t add_c = bytecode[next + 3];
 
-        // Check if the LOAD_IMM destination is used as an ADD operand
         if (add_b == imm_dest) {
-            // Pattern: LOAD_IMM Rtemp, imm; ADD Rdest = Rtemp + Rsrc
-            // Fuse: ADD_IMM Rdest = Rsrc + imm
             bytecode[next] = op_byte(Opcode::ADD_IMM);
-            bytecode[next + 1] = add_a;  // destination
-            bytecode[next + 2] = add_c;  // source (the other operand)
-            bytecode[next + 3] = imm_value; // immediate
-            bytecode[i] = op_byte(Opcode::NOP); // remove LOAD_IMM
+            bytecode[next + 1] = add_a;
+            bytecode[next + 2] = add_c;
+            bytecode[next + 3] = imm_value;
+            bytecode[i] = op_byte(Opcode::NOP);
         } else if (add_c == imm_dest) {
-            // Pattern: LOAD_IMM Rtemp, imm; ADD Rdest = Rsrc + Rtemp
-            // Fuse: ADD_IMM Rdest = Rsrc + imm
             bytecode[next] = op_byte(Opcode::ADD_IMM);
-            bytecode[next + 1] = add_a;  // destination
-            bytecode[next + 2] = add_b;  // source (the other operand)
-            bytecode[next + 3] = imm_value; // immediate
-            bytecode[i] = op_byte(Opcode::NOP); // remove LOAD_IMM
+            bytecode[next + 1] = add_a;
+            bytecode[next + 2] = add_b;
+            bytecode[next + 3] = imm_value;
+            bytecode[i] = op_byte(Opcode::NOP);
         }
     }
 
-    // Pass 1b: NOP compaction disabled — jump offset adjustment is complex
-    // Dead MOVEs are replaced with NOPs which still dispatch but are very fast
-    // (NOP handler just increments IP)
+    // Pass 2: Fuse compare + branch → JMP_IF_NOT_LT/LTE/GT/GTE/EQ
+    // Pattern: LT R3=R2,R0; JMP_IF_FALSE R3 +offset → JMP_IF_NOT_LT R2,R0,adjusted_offset
+    for (size_t i = 0; i + 8 <= len; i += 4) {
+        uint8_t op = bytecode[i];
+        Opcode cmp_op = static_cast<Opcode>(op);
+        if (cmp_op != Opcode::LT && cmp_op != Opcode::LTE &&
+            cmp_op != Opcode::GT && cmp_op != Opcode::GTE &&
+            cmp_op != Opcode::EQ) continue;
+
+        uint8_t cmp_a = bytecode[i + 1];
+        uint8_t cmp_b = bytecode[i + 2];
+        uint8_t cmp_c = bytecode[i + 3];
+
+        size_t next = i + 4;
+        if (next + 4 > len) continue;
+        if (bytecode[next] != op_byte(Opcode::JMP_IF_FALSE)) continue;
+        if (bytecode[next + 1] != cmp_a) continue;
+
+        // Original offset is relative to JMP_IF_FALSE at position `next`
+        int16_t old_offset = static_cast<int16_t>((bytecode[next + 2] << 8) | bytecode[next + 3]);
+        // Target absolute position
+        int target = static_cast<int>(next) + 4 + old_offset;
+        // New offset relative to the fused instruction at position `i`
+        int new_offset = target - static_cast<int>(i) - 4;
+        if (new_offset < -128 || new_offset > 127) continue;
+
+        Opcode fused;
+        switch (cmp_op) {
+            case Opcode::LT:  fused = Opcode::JMP_IF_NOT_LT;  break;
+            case Opcode::LTE: fused = Opcode::JMP_IF_NOT_LTE; break;
+            case Opcode::GT:  fused = Opcode::JMP_IF_NOT_GT;  break;
+            case Opcode::GTE: fused = Opcode::JMP_IF_NOT_GTE; break;
+            case Opcode::EQ:  fused = Opcode::JMP_IF_NOT_EQ;  break;
+            default: continue;
+        }
+
+        bytecode[i] = op_byte(fused);
+        bytecode[i + 1] = cmp_b;
+        bytecode[i + 2] = cmp_c;
+        bytecode[i + 3] = static_cast<uint8_t>(new_offset & 0xFF);
+        bytecode[next] = op_byte(Opcode::NOP);
+    }
 }
 
 } // namespace akar

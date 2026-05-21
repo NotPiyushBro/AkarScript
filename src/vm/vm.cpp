@@ -313,6 +313,9 @@ InterpretResult VM::run() {
         &&op_MOD_EQ_ZERO,
         // Small integer inline
         &&op_LOAD_IMM, &&op_ADD_IMM,
+        // Fused compare-branch
+        &&op_JMP_IF_NOT_LT, &&op_JMP_IF_NOT_LTE,
+        &&op_JMP_IF_NOT_GT, &&op_JMP_IF_NOT_GTE, &&op_JMP_IF_NOT_EQ,
         // Fiber/coroutine
         &&op_FIBER_YIELD, &&op_FIBER_RESUME,
         // Tail call, await, exception
@@ -719,6 +722,37 @@ InterpretResult VM::run() {
     CASE(ADD_IMM): {
         uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
         S(a) = Value(S(b).get_number() + static_cast<double>(c));
+        DISPATCH();
+    }
+    // Fused compare-branch: if !(R[A] op R[B]) PC += signed_C
+    CASE(JMP_IF_NOT_LT): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4;
+        if (!(S(a).get_number() < S(b).get_number())) ip += c;
+        if (c < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
+        DISPATCH();
+    }
+    CASE(JMP_IF_NOT_LTE): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4;
+        if (!(S(a).get_number() <= S(b).get_number())) ip += c;
+        if (c < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
+        DISPATCH();
+    }
+    CASE(JMP_IF_NOT_GT): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4;
+        if (!(S(a).get_number() > S(b).get_number())) ip += c;
+        if (c < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
+        DISPATCH();
+    }
+    CASE(JMP_IF_NOT_GTE): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4;
+        if (!(S(a).get_number() >= S(b).get_number())) ip += c;
+        if (c < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
+        DISPATCH();
+    }
+    CASE(JMP_IF_NOT_EQ): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4;
+        if (!(S(a) == S(b))) ip += c;
+        if (c < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
         DISPATCH();
     }
     CASE(NOT): {

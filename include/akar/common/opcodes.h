@@ -103,6 +103,14 @@ enum class Opcode : uint8_t {
     LOAD_IMM,       // A = B (immediate 8-bit value, 0-255) — no constant table lookup
     ADD_IMM,        // A = R[B] + C (immediate 8-bit add) — fuses LOAD_IMM + ADD
 
+    // Fused compare-branch (8-bit signed offset, covers ±127 bytes)
+    // Encoding: [op][A][B][signed_C] — if !(R[A] op R[B]) PC += signed_C
+    JMP_IF_NOT_LT,  // if !(R[A] < R[B])  PC += signed_C
+    JMP_IF_NOT_LTE, // if !(R[A] <= R[B]) PC += signed_C
+    JMP_IF_NOT_GT,  // if !(R[A] > R[B])  PC += signed_C
+    JMP_IF_NOT_GTE, // if !(R[A] >= R[B]) PC += signed_C
+    JMP_IF_NOT_EQ,  // if !(R[A] == R[B]) PC += signed_C
+
     // Fiber/Coroutine
     FIBER_YIELD,    // yield R[A] from current fiber, resume value goes to R[A]
     FIBER_RESUME,   // resume fiber R[B], pass R[C] as resume value, result in R[A]
