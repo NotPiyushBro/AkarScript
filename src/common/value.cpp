@@ -26,6 +26,7 @@ bool memory_limit_exceeded() {
 
 size_t get_next_gc() { return g_next_gc; }
 void set_next_gc(size_t threshold) { g_next_gc = threshold; }
+Obj* get_object_list_head() { return g_objects; }
 
 void free_all_objects() {
     Obj* obj = g_objects;
@@ -164,6 +165,38 @@ void gc_sweep() {
                 g_allocated_bytes = 0;
             }
             delete unreached;
+        }
+    }
+}
+
+bool gc_gray_stack_empty() { return g_gray_stack.empty(); }
+
+Obj* gc_gray_stack_pop() {
+    Obj* obj = g_gray_stack.back();
+    g_gray_stack.pop_back();
+    return obj;
+}
+
+void gc_sweep_incremental(int max_work) {
+    int work = 0;
+    Obj** prev = &g_objects;
+    Obj* obj = g_objects;
+    while (obj && work < max_work) {
+        if (obj->marked) {
+            obj->marked = false;
+            prev = &obj->next;
+            obj = obj->next;
+        } else {
+            Obj* unreached = obj;
+            obj = obj->next;
+            *prev = obj;
+            if (g_allocated_bytes >= unreached->alloc_size) {
+                g_allocated_bytes -= unreached->alloc_size;
+            } else {
+                g_allocated_bytes = 0;
+            }
+            delete unreached;
+            work++;
         }
     }
 }

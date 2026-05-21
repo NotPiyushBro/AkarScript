@@ -63,7 +63,14 @@ public:
 
     // GC
     void mark_roots();
-    void collect_garbage();
+    void collect_garbage();  // full synchronous GC (blocking)
+    void gc_step();          // incremental GC step (non-blocking, processes a batch)
+
+    // Incremental GC state
+    enum class GCPhase { Idle, Marking, Sweeping };
+    GCPhase gc_phase_ = GCPhase::Idle;
+    static constexpr int GC_MARK_WORK = 64;   // objects to trace per incremental step
+    static constexpr int GC_SWEEP_WORK = 32;  // objects to sweep per incremental step
 
     // Fiber yield support
     bool yield_pending_ = false;

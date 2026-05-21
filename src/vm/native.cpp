@@ -9,6 +9,7 @@
 #include <thread>
 #include <cstring>
 #include <random>
+#include <limits>
 
 namespace akar {
 
@@ -450,6 +451,200 @@ void register_builtins(VM& vm) {
         else if (fiber->state == ObjFiber::State::Suspended) s = "suspended";
         else if (fiber->state == ObjFiber::State::Done) s = "done";
         return Value(static_cast<Obj*>(get_string_table().intern(s)));
+    });
+
+    // ========== Standard Math Library ==========
+
+    // ========== Standard Math Library ==========
+
+    // --- Constants (set as globals, not functions) ---
+    vm.set_global("PI", Value(M_PI));
+    vm.set_global("E", Value(M_E));
+
+    // Special values
+    vm.define_native("nan", [](int, Value*) -> Value { return Value(std::numeric_limits<double>::quiet_NaN()); });
+    vm.define_native("inf", [](int, Value*) -> Value { return Value(std::numeric_limits<double>::infinity()); });
+    vm.define_native("isnan", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() && std::isnan(argv[0].get_number()); });
+    vm.define_native("isinf", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() && std::isinf(argv[0].get_number()); });
+
+    // Trig
+    vm.define_native("sin", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::sin(argv[0].get_number())) : Value(); });
+    vm.define_native("cos", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::cos(argv[0].get_number())) : Value(); });
+    vm.define_native("tan", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::tan(argv[0].get_number())) : Value(); });
+    vm.define_native("asin", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::asin(argv[0].get_number())) : Value(); });
+    vm.define_native("acos", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::acos(argv[0].get_number())) : Value(); });
+    vm.define_native("atan", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::atan(argv[0].get_number())) : Value(); });
+    vm.define_native("atan2", [](int argc, Value* argv) -> Value { return argc >= 2 ? Value(std::atan2(argv[0].get_number(), argv[1].get_number())) : Value(); });
+
+    // Hyperbolic
+    vm.define_native("sinh", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::sinh(argv[0].get_number())) : Value(); });
+    vm.define_native("cosh", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::cosh(argv[0].get_number())) : Value(); });
+    vm.define_native("tanh", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::tanh(argv[0].get_number())) : Value(); });
+
+    // Logarithmic / Exponential
+    vm.define_native("log", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::log(argv[0].get_number())) : Value(); });
+    vm.define_native("log2", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::log2(argv[0].get_number())) : Value(); });
+    vm.define_native("log10", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::log10(argv[0].get_number())) : Value(); });
+    vm.define_native("exp", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::exp(argv[0].get_number())) : Value(); });
+    vm.define_native("pow", [](int argc, Value* argv) -> Value { return argc >= 2 ? Value(std::pow(argv[0].get_number(), argv[1].get_number())) : Value(); });
+
+    // Rounding
+    vm.define_native("round", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::round(argv[0].get_number())) : Value(); });
+    vm.define_native("trunc", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::trunc(argv[0].get_number())) : Value(); });
+
+    // Comparison (variadic)
+    vm.define_native("min", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_number()) return Value();
+        double m = argv[0].get_number();
+        for (int i = 1; i < argc; i++) { if (argv[i].is_number() && argv[i].get_number() < m) m = argv[i].get_number(); }
+        return Value(m);
+    });
+    vm.define_native("max", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_number()) return Value();
+        double m = argv[0].get_number();
+        for (int i = 1; i < argc; i++) { if (argv[i].is_number() && argv[i].get_number() > m) m = argv[i].get_number(); }
+        return Value(m);
+    });
+    vm.define_native("clamp", [](int argc, Value* argv) -> Value {
+        if (argc < 3) return Value();
+        double val = argv[0].get_number(), lo = argv[1].get_number(), hi = argv[2].get_number();
+        if (val < lo) return Value(lo); if (val > hi) return Value(hi); return Value(val);
+    });
+
+    // Game math
+    vm.define_native("sign", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_number()) return Value(0.0);
+        double x = argv[0].get_number(); return Value(x > 0 ? 1.0 : (x < 0 ? -1.0 : 0.0));
+    });
+    vm.define_native("lerp", [](int argc, Value* argv) -> Value {
+        if (argc < 3) return Value();
+        return Value(argv[0].get_number() + (argv[1].get_number() - argv[0].get_number()) * argv[2].get_number());
+    });
+    vm.define_native("deg_to_rad", [](int argc, Value* argv) -> Value { return argc >= 1 ? Value(argv[0].get_number() * M_PI / 180.0) : Value(); });
+    vm.define_native("rad_to_deg", [](int argc, Value* argv) -> Value { return argc >= 1 ? Value(argv[0].get_number() * 180.0 / M_PI) : Value(); });
+    vm.define_native("fmod", [](int argc, Value* argv) -> Value { return argc >= 2 ? Value(std::fmod(argv[0].get_number(), argv[1].get_number())) : Value(); });
+
+    // Vec2 [x, y]
+    vm.define_native("vec2", [](int argc, Value* argv) -> Value {
+        auto* arr = allocate_array();
+        arr->elements.push_back(argc >= 1 ? argv[0] : Value(0.0));
+        arr->elements.push_back(argc >= 2 ? argv[1] : Value(0.0));
+        return Value(static_cast<Obj*>(arr));
+    });
+    vm.define_native("vec2_add", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        auto* r = allocate_array();
+        r->elements.push_back(Value(a->elements[0].get_number() + b->elements[0].get_number()));
+        r->elements.push_back(Value(a->elements[1].get_number() + b->elements[1].get_number()));
+        return Value(static_cast<Obj*>(r));
+    });
+    vm.define_native("vec2_sub", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        auto* r = allocate_array();
+        r->elements.push_back(Value(a->elements[0].get_number() - b->elements[0].get_number()));
+        r->elements.push_back(Value(a->elements[1].get_number() - b->elements[1].get_number()));
+        return Value(static_cast<Obj*>(r));
+    });
+    vm.define_native("vec2_scale", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_number()) return Value();
+        auto* v = argv[0].as_array(); double s = argv[1].get_number();
+        auto* r = allocate_array();
+        r->elements.push_back(Value(v->elements[0].get_number() * s));
+        r->elements.push_back(Value(v->elements[1].get_number() * s));
+        return Value(static_cast<Obj*>(r));
+    });
+    vm.define_native("vec2_dot", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        return Value(a->elements[0].get_number() * b->elements[0].get_number() + a->elements[1].get_number() * b->elements[1].get_number());
+    });
+    vm.define_native("vec2_len", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        auto* v = argv[0].as_array();
+        double x = v->elements[0].get_number(), y = v->elements[1].get_number();
+        return Value(std::sqrt(x * x + y * y));
+    });
+    vm.define_native("vec2_normalize", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        auto* v = argv[0].as_array();
+        double x = v->elements[0].get_number(), y = v->elements[1].get_number();
+        double len = std::sqrt(x * x + y * y);
+        if (len == 0) { auto* r = allocate_array(); r->elements.push_back(Value(0.0)); r->elements.push_back(Value(0.0)); return Value(static_cast<Obj*>(r)); }
+        auto* r = allocate_array(); r->elements.push_back(Value(x / len)); r->elements.push_back(Value(y / len));
+        return Value(static_cast<Obj*>(r));
+    });
+    vm.define_native("vec2_dist", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        double dx = a->elements[0].get_number() - b->elements[0].get_number();
+        double dy = a->elements[1].get_number() - b->elements[1].get_number();
+        return Value(std::sqrt(dx * dx + dy * dy));
+    });
+
+    // Vec3 [x, y, z]
+    vm.define_native("vec3", [](int argc, Value* argv) -> Value {
+        auto* arr = allocate_array();
+        arr->elements.push_back(argc >= 1 ? argv[0] : Value(0.0));
+        arr->elements.push_back(argc >= 2 ? argv[1] : Value(0.0));
+        arr->elements.push_back(argc >= 3 ? argv[2] : Value(0.0));
+        return Value(static_cast<Obj*>(arr));
+    });
+    vm.define_native("vec3_add", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array(); auto* r = allocate_array();
+        for (int i = 0; i < 3; i++) r->elements.push_back(Value(a->elements[i].get_number() + b->elements[i].get_number()));
+        return Value(static_cast<Obj*>(r));
+    });
+    vm.define_native("vec3_sub", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array(); auto* r = allocate_array();
+        for (int i = 0; i < 3; i++) r->elements.push_back(Value(a->elements[i].get_number() - b->elements[i].get_number()));
+        return Value(static_cast<Obj*>(r));
+    });
+    vm.define_native("vec3_scale", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_number()) return Value();
+        auto* v = argv[0].as_array(); double s = argv[1].get_number(); auto* r = allocate_array();
+        for (int i = 0; i < 3; i++) r->elements.push_back(Value(v->elements[i].get_number() * s));
+        return Value(static_cast<Obj*>(r));
+    });
+    vm.define_native("vec3_dot", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        return Value(a->elements[0].get_number() * b->elements[0].get_number() + a->elements[1].get_number() * b->elements[1].get_number() + a->elements[2].get_number() * b->elements[2].get_number());
+    });
+    vm.define_native("vec3_cross", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        double ax = a->elements[0].get_number(), ay = a->elements[1].get_number(), az = a->elements[2].get_number();
+        double bx = b->elements[0].get_number(), by = b->elements[1].get_number(), bz = b->elements[2].get_number();
+        auto* r = allocate_array();
+        r->elements.push_back(Value(ay * bz - az * by)); r->elements.push_back(Value(az * bx - ax * bz)); r->elements.push_back(Value(ax * by - ay * bx));
+        return Value(static_cast<Obj*>(r));
+    });
+    vm.define_native("vec3_len", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        auto* v = argv[0].as_array();
+        double x = v->elements[0].get_number(), y = v->elements[1].get_number(), z = v->elements[2].get_number();
+        return Value(std::sqrt(x * x + y * y + z * z));
+    });
+    vm.define_native("vec3_normalize", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        auto* v = argv[0].as_array();
+        double x = v->elements[0].get_number(), y = v->elements[1].get_number(), z = v->elements[2].get_number();
+        double len = std::sqrt(x * x + y * y + z * z);
+        if (len == 0) return Value(static_cast<Obj*>(allocate_array()));
+        auto* r = allocate_array(); r->elements.push_back(Value(x / len)); r->elements.push_back(Value(y / len)); r->elements.push_back(Value(z / len));
+        return Value(static_cast<Obj*>(r));
+    });
+    vm.define_native("vec3_dist", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        double dx = a->elements[0].get_number() - b->elements[0].get_number();
+        double dy = a->elements[1].get_number() - b->elements[1].get_number();
+        double dz = a->elements[2].get_number() - b->elements[2].get_number();
+        return Value(std::sqrt(dx * dx + dy * dy + dz * dz));
     });
 }
 

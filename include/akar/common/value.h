@@ -292,6 +292,7 @@ void set_memory_limit(size_t limit);
 size_t get_memory_limit();
 size_t get_next_gc();
 void set_next_gc(size_t threshold);
+Obj* get_object_list_head();  // for incremental GC sweep
 
 // Garbage collection (mark-sweep)
 void gc_mark_object(Obj* obj);
@@ -300,5 +301,10 @@ void gc_trace_references(Obj* obj);
 void gc_sweep();
 size_t gc_drain_gray_stack();
 void gc_mark_string_table();
+
+// Incremental GC helpers
+bool gc_gray_stack_empty();
+Obj* gc_gray_stack_pop();
+void gc_sweep_incremental(int max_work);  // sweep up to max_work objects
 
 } // namespace akar

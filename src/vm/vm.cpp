@@ -84,6 +84,58 @@ void VM::collect_garbage() {
     gc_sweep();
     // Grow the threshold for next collection
     set_next_gc(get_allocated_bytes() * 2);
+    gc_phase_ = GCPhase::Idle;
+}
+
+void VM::gc_step() {
+    // Only start GC if threshold exceeded
+    if (gc_phase_ == GCPhase::Idle && get_allocated_bytes() < get_next_gc()) return;
+
+    switch (gc_phase_) {
+        case GCPhase::Idle: {
+            // Start marking: mark roots from ALL active VMs
+            for (VM* vm : active_vms_) {
+                vm->mark_roots();
+            }
+            gc_mark_string_table();
+            gc_phase_ = GCPhase::Marking;
+            // Fall through to do some marking work
+            [[fallthrough]];
+        }
+        case GCPhase::Marking: {
+            // Process a batch of gray objects (incremental)
+            int work = 0;
+            while (!gc_gray_stack_empty() && work < GC_MARK_WORK) {
+                Obj* obj = gc_gray_stack_pop();
+                gc_trace_references(obj);
+                work++;
+            }
+            // If gray stack is empty, re-mark roots (objects allocated during
+            // marking won't have been marked yet) and continue marking
+            if (gc_gray_stack_empty()) {
+                // Re-mark roots to catch objects allocated during incremental marking
+                for (VM* vm : active_vms_) {
+                    vm->mark_roots();
+                }
+                gc_mark_string_table();
+                // If gray stack is still empty after re-marking, move to sweep
+                if (gc_gray_stack_empty()) {
+                    gc_phase_ = GCPhase::Sweeping;
+                }
+                // Otherwise continue marking next step
+            }
+            if (gc_phase_ != GCPhase::Sweeping) return;
+            // Fall through to sweep
+            [[fallthrough]];
+        }
+        case GCPhase::Sweeping: {
+            // Sweep all unmarked objects atomically
+            gc_sweep();
+            gc_phase_ = GCPhase::Idle;
+            set_next_gc(get_allocated_bytes() * 2);
+            return;
+        }
+    }
 }
 
 InterpretResult VM::interpret(const std::string& source) {
@@ -202,14 +254,12 @@ InterpretResult VM::run() {
     } while(0)
 
     #define CHECK_MEMORY_LIMIT() do { \
-        if (__builtin_expect(++opcode_counter >= 1024, 0)) { \
+        if (__builtin_expect(++opcode_counter >= 128, 0)) { \
             opcode_counter = 0; \
-            if (get_allocated_bytes() >= get_next_gc()) { \
-                collect_garbage(); \
-                if (memory_limit_exceeded()) { \
-                    runtime_error("Memory limit exceeded (%zu bytes)", get_memory_limit()); \
-                    RETURN_RUNTIME_ERROR; \
-                } \
+            gc_step(); \
+            if (memory_limit_exceeded()) { \
+                runtime_error("Memory limit exceeded (%zu bytes)", get_memory_limit()); \
+                RETURN_RUNTIME_ERROR; \
             } \
         } \
     } while(0)
@@ -251,6 +301,46 @@ InterpretResult VM::run() {
         goto *dispatch_table[ip[0]]; \
     } while(0)
     #define CASE(op) op_##op
+
+    // Operator overloading: try calling a magic method on the left operand's class
+    // Usage: TRY_OP_OVERLOAD(result_reg, left_val, right_val, "__add")
+    // If the left operand is an instance with the magic method, calls it and jumps to DISPATCH.
+    // Otherwise falls through (does nothing).
+    #define TRY_OP_OVERLOAD(res_reg, lhs, rhs, magic_name) do { \
+        if ((lhs).is_instance()) { \
+            ObjClass* inst_klass = (lhs).as_instance()->klass; \
+            auto it = inst_klass->methods.find(magic_name); \
+            if (it != inst_klass->methods.end() && it->second.is_closure()) { \
+                ObjClosure* method = it->second.as_closure(); \
+                int call_abs = base + (res_reg); \
+                /* call() will store closure at call_abs, args at call_abs+1..N */ \
+                /* arity=2: this + other. The compiler counts 'this' as arg 0. */ \
+                stack_[call_abs + 1] = (lhs); \
+                stack_[call_abs + 2] = (rhs); \
+                frame->ip = ip; \
+                if (!call(method, 2, (res_reg), call_abs)) { RETURN_RUNTIME_ERROR; } \
+                REFRESH_FRAME(); \
+                DISPATCH(); \
+            } \
+        } \
+    } while(0)
+
+    // Unary operator overloading: try calling a magic method on the operand's class
+    #define TRY_UNARY_OP_OVERLOAD(res_reg, operand, magic_name) do { \
+        if ((operand).is_instance()) { \
+            ObjClass* inst_klass = (operand).as_instance()->klass; \
+            auto it = inst_klass->methods.find(magic_name); \
+            if (it != inst_klass->methods.end() && it->second.is_closure()) { \
+                ObjClosure* method = it->second.as_closure(); \
+                int call_abs = base + (res_reg); \
+                stack_[call_abs + 1] = (operand); \
+                frame->ip = ip; \
+                if (!call(method, 1, (res_reg), call_abs)) { RETURN_RUNTIME_ERROR; } \
+                REFRESH_FRAME(); \
+                DISPATCH(); \
+            } \
+        } \
+    } while(0)
 
     for (;;) {
     loop_continue:
@@ -367,6 +457,7 @@ InterpretResult VM::run() {
             S(a) = Value(static_cast<Obj*>(result));
             *(ip - 4) = op_byte(Opcode::ADD_STR); // quicken
         } else {
+            TRY_OP_OVERLOAD(a, rb, rc, "__add");
             runtime_error("Operands must be two numbers or two strings");
             RETURN_RUNTIME_ERROR;
         }
@@ -389,7 +480,7 @@ InterpretResult VM::run() {
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() - rc.get_number());
             *(ip - 4) = op_byte(Opcode::SUB_NUM);
-        } else { runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
+        } else { TRY_OP_OVERLOAD(a, rb, rc, "__sub"); runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
         DISPATCH();
     }
     CASE(SUB_NUM): {
@@ -403,7 +494,7 @@ InterpretResult VM::run() {
         if (rb.is_number() && rc.is_number()) {
             S(a) = Value(rb.get_number() * rc.get_number());
             *(ip - 4) = op_byte(Opcode::MUL_NUM);
-        } else { runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
+        } else { TRY_OP_OVERLOAD(a, rb, rc, "__mul"); runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
         DISPATCH();
     }
     CASE(MUL_NUM): {
@@ -419,7 +510,7 @@ InterpretResult VM::run() {
             if (__builtin_expect(d == 0, 0)) { runtime_error("Division by zero"); RETURN_RUNTIME_ERROR; }
             S(a) = Value(rb.get_number() / d);
             *(ip - 4) = op_byte(Opcode::DIV_NUM);
-        } else { runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
+        } else { TRY_OP_OVERLOAD(a, rb, rc, "__div"); runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
         DISPATCH();
     }
     CASE(DIV_NUM): {
@@ -437,7 +528,7 @@ InterpretResult VM::run() {
             if (__builtin_expect(d == 0, 0)) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; }
             S(a) = Value(std::fmod(rb.get_number(), d));
             *(ip - 4) = op_byte(Opcode::MOD_NUM);
-        } else { runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
+        } else { TRY_OP_OVERLOAD(a, rb, rc, "__mod"); runtime_error("Operands must be numbers"); RETURN_RUNTIME_ERROR; }
         DISPATCH();
     }
     CASE(MOD_NUM): {
@@ -451,6 +542,7 @@ InterpretResult VM::run() {
         ip += 4;
         Value& rb = S(b);
         if (!rb.is_number()) {
+            TRY_UNARY_OP_OVERLOAD(a, rb, "__neg");
             runtime_error("Operand must be a number");
             RETURN_RUNTIME_ERROR;
         }
@@ -460,6 +552,21 @@ InterpretResult VM::run() {
     CASE(EQ): {
         uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
         Value& rb = S(b); Value& rc = S(c);
+        // For instances, try __eq overloading before pointer comparison
+        if (rb.is_instance() && rc.is_instance()) {
+            ObjClass* inst_klass = rb.as_instance()->klass;
+            auto it = inst_klass->methods.find("__eq");
+            if (it != inst_klass->methods.end() && it->second.is_closure()) {
+                ObjClosure* method = it->second.as_closure();
+                int call_abs = base + a;
+                stack_[call_abs + 1] = rb;
+                stack_[call_abs + 2] = rc;
+                frame->ip = ip;
+                if (!call(method, 2, a, call_abs)) { RETURN_RUNTIME_ERROR; }
+                REFRESH_FRAME();
+                DISPATCH();
+            }
+        }
         S(a) = Value(rb == rc);
         DISPATCH();
     }
@@ -486,7 +593,7 @@ InterpretResult VM::run() {
             S(a) = Value(rb.get_number() < rc.get_number());
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value < rc.as_string()->value);
-        } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+        } else { TRY_OP_OVERLOAD(a, rb, rc, "__lt"); runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
         DISPATCH();
     }
     CASE(LT_NUM): {
@@ -501,7 +608,7 @@ InterpretResult VM::run() {
             S(a) = Value(rb.get_number() <= rc.get_number());
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value <= rc.as_string()->value);
-        } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+        } else { TRY_OP_OVERLOAD(a, rb, rc, "__le"); runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
         DISPATCH();
     }
     CASE(LTE_NUM): {
@@ -516,7 +623,7 @@ InterpretResult VM::run() {
             S(a) = Value(rb.get_number() > rc.get_number());
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value > rc.as_string()->value);
-        } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+        } else { TRY_OP_OVERLOAD(a, rb, rc, "__gt"); runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
         DISPATCH();
     }
     CASE(GT_NUM): {
@@ -531,7 +638,7 @@ InterpretResult VM::run() {
             S(a) = Value(rb.get_number() >= rc.get_number());
         } else if (rb.is_string() && rc.is_string()) {
             S(a) = Value(rb.as_string()->value >= rc.as_string()->value);
-        } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+        } else { TRY_OP_OVERLOAD(a, rb, rc, "__ge"); runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
         DISPATCH();
     }
     CASE(GTE_NUM): {
