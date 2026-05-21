@@ -36,6 +36,17 @@ target_link_libraries(akar PRIVATE akar_core)
 add_executable(akar_disasm src/disasm_main.cpp)
 target_include_directories(akar_disasm PRIVATE include)
 
+# Embedding API library
+add_library(akar_api STATIC
+    src/api/akar_api.cpp
+)
+target_include_directories(akar_api PUBLIC include)
+target_link_libraries(akar_api PUBLIC akar_core)
+
+# Embedding example
+add_executable(embed_demo examples/embed_demo.cpp)
+target_link_libraries(embed_demo PRIVATE akar_api)
+
 # Tests
 enable_testing()
 add_executable(akar_tests tests/test_main.cpp)
