@@ -71,12 +71,15 @@ void register_builtins(VM& vm) {
         if (argv[0].is_nil()) t = "nil";
         else if (argv[0].is_bool()) t = "bool";
         else if (argv[0].is_number()) t = "number";
+        else if (is_enum_value(argv[0])) t = "enum";
         else if (argv[0].is_string()) t = "string";
         else if (argv[0].is_array()) t = "array";
         else if (argv[0].is_map()) t = "map";
         else if (argv[0].is_function() || argv[0].is_closure()) t = "function";
         else if (argv[0].is_class()) t = "class";
         else if (argv[0].is_instance()) t = "instance";
+        else if (argv[0].is_signal()) t = "signal";
+        else if (argv[0].is_effect()) t = "effect";
         else t = "unknown";
         return Value(static_cast<Obj*>(get_string_table().intern(t)));
     });
