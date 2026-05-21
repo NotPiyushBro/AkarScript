@@ -551,12 +551,20 @@ void CodeGenerator::compile_assignment(AssignmentExpr* node, int reg) {
         if (local >= 0) {
             emit(op_byte(Opcode::SIGNAL_SET), local, val, 0);
         } else {
-            // Signal stored as global: load signal object, then SIGNAL_SET
-            uint16_t name_const = make_identifier_constant(node->name);
-            int sig_reg = alloc_register();
-            emit_bx(op_byte(Opcode::GET_GLOBAL), sig_reg, name_const);
-            emit(op_byte(Opcode::SIGNAL_SET), sig_reg, val, 0);
-            free_register(); // sig_reg
+            int upvalue = resolve_upvalue(node->name);
+            if (upvalue >= 0) {
+                int sig_reg = alloc_register();
+                emit(op_byte(Opcode::GET_UPVALUE), sig_reg, upvalue, 0);
+                emit(op_byte(Opcode::SIGNAL_SET), sig_reg, val, 0);
+                free_register(); // sig_reg
+            } else {
+                // Signal stored as global: load signal object, then SIGNAL_SET
+                uint16_t name_const = make_identifier_constant(node->name);
+                int sig_reg = alloc_register();
+                emit_bx(op_byte(Opcode::GET_GLOBAL), sig_reg, name_const);
+                emit(op_byte(Opcode::SIGNAL_SET), sig_reg, val, 0);
+                free_register(); // sig_reg
+            }
         }
         emit(op_byte(Opcode::MOVE), reg, val, 0);
         free_register(); // val
@@ -1397,12 +1405,10 @@ uint16_t CodeGenerator::make_identifier_constant(const std::string& name) {
 }
 
 void CodeGenerator::compile_signal_decl(SignalDeclStmt* node) {
-    // Compile the initial value
-    int init_reg = compile_expr(node->initializer);
-    // Create signal: SIGNAL_CREATE dest, init_reg
-    int sig_reg = alloc_register();
-    emit(op_byte(Opcode::SIGNAL_CREATE), sig_reg, init_reg, 0);
-    free_register(); // init_reg
+    // Compile the initial value — reuse its register for the signal object
+    // SIGNAL_CREATE A, B reads S(B) first, then writes to S(A), so A==B is safe
+    int reg = compile_expr(node->initializer);
+    emit(op_byte(Opcode::SIGNAL_CREATE), reg, reg, 0);
 
     // Track this variable as a signal
     signal_set_.insert(node->name);
@@ -1410,10 +1416,11 @@ void CodeGenerator::compile_signal_decl(SignalDeclStmt* node) {
     if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
         // Top-level: set as global
         uint16_t name_const = make_identifier_constant(node->name);
-        emit_bx(op_byte(Opcode::SET_GLOBAL), sig_reg, name_const);
-        free_register(); // sig_reg
+        emit_bx(op_byte(Opcode::SET_GLOBAL), reg, name_const);
+        free_register();
     } else {
-        declare_local(node->name, sig_reg);
+        // reg is already allocated by compile_expr, use it directly as the local
+        declare_local(node->name, reg);
     }
 }
 
