@@ -1594,14 +1594,29 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
             uint8_t scan_op = bytecode[j];
             if (scan_op == op_byte(Opcode::WIDE)) break; // can't analyze wide
             // Control flow — can't determine, keep MOVE for safety
-            if (scan_op == op_byte(Opcode::JMP) ||
-                scan_op == op_byte(Opcode::JMP_IF_FALSE) ||
+            if (scan_op == op_byte(Opcode::JMP_IF_FALSE) ||
                 scan_op == op_byte(Opcode::JMP_IF_TRUE) ||
                 scan_op == op_byte(Opcode::RETURN) ||
                 scan_op == op_byte(Opcode::HALT) ||
                 scan_op == op_byte(Opcode::CALL) ||
                 scan_op == op_byte(Opcode::TAIL_CALL)) {
                 break;
+            }
+            // Backward JMP (loop back-edge): check if jump target overwrites MOVE dest
+            if (scan_op == op_byte(Opcode::JMP)) {
+                int16_t jmp_offset = static_cast<int16_t>((bytecode[j + 2] << 8) | bytecode[j + 3]);
+                if (jmp_offset < 0) {
+                    size_t target = static_cast<size_t>(static_cast<int64_t>(j) + 4 + jmp_offset);
+                    if (target + 4 <= len) {
+                        // Check if the instruction at the jump target overwrites MOVE dest
+                        uint8_t target_op = bytecode[target];
+                        int target_dest = opcode_dest_reg(target_op);
+                        if (target_dest >= 0 && bytecode[target + 1 + target_dest] == move_dest) {
+                            dead = true;
+                        }
+                    }
+                }
+                break; // can't scan past any JMP
             }
 
             int dest = opcode_dest_reg(scan_op);
