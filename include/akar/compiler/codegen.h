@@ -7,6 +7,14 @@
 
 namespace akar {
 
+// Compile-time register type tracking for opcode specialization
+enum class RegType : uint8_t {
+    Unknown = 0,  // type not known at compile time
+    Number,       // known to be a number (f64)
+    String,       // known to be a string
+    Bool,         // known to be a boolean
+};
+
 // Local variable in register
 struct Local {
     std::string name;
@@ -34,6 +42,9 @@ struct CompilerScope {
     // Break/continue jump targets
     std::vector<int> break_jumps;
     std::vector<int> continue_targets;
+
+    // Type tracking: register id → known compile-time type
+    std::unordered_map<int, RegType> reg_types;
 };
 
 class CodeGenerator {
@@ -93,6 +104,14 @@ private:
     int alloc_register();
     void free_register();
     int current_register() const;
+
+    // Type tracking helpers
+    void set_reg_type(int reg, RegType type) { current_scope_->reg_types[reg] = type; }
+    RegType get_reg_type(int reg) const {
+        auto it = current_scope_->reg_types.find(reg);
+        return (it != current_scope_->reg_types.end()) ? it->second : RegType::Unknown;
+    }
+    void clear_reg_type(int reg) { current_scope_->reg_types.erase(reg); }
 
     // Scope management
     void begin_scope();

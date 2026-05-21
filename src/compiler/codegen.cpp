@@ -240,6 +240,7 @@ void CodeGenerator::compile_stmt(const ASTPtr& node) {
 }
 
 void CodeGenerator::compile_number(NumberLiteral* node, int reg) {
+    set_reg_type(reg, RegType::Number);
     // Use LOAD_IMM for small non-negative integers (0-255)
     double v = node->value;
     if (v >= 0 && v <= 255 && v == std::floor(v)) {
@@ -251,6 +252,7 @@ void CodeGenerator::compile_number(NumberLiteral* node, int reg) {
 }
 
 void CodeGenerator::compile_string(StringLiteral* node, int reg) {
+    set_reg_type(reg, RegType::String);
     auto* str = get_string_table().intern(node->value);
     uint16_t cx = make_constant(Value(static_cast<Obj*>(str)));
     literal_values_.insert(node->value);
@@ -258,10 +260,12 @@ void CodeGenerator::compile_string(StringLiteral* node, int reg) {
 }
 
 void CodeGenerator::compile_bool(BoolLiteral* node, int reg) {
+    set_reg_type(reg, RegType::Bool);
     emit(op_byte(node->value ? Opcode::LOAD_TRUE : Opcode::LOAD_FALSE), reg, 0, 0);
 }
 
 void CodeGenerator::compile_nil(NilLiteral*, int reg) {
+    clear_reg_type(reg);
     emit(op_byte(Opcode::LOAD_NIL), reg, 0, 0);
 }
 
@@ -310,8 +314,11 @@ void CodeGenerator::compile_identifier(Identifier* node, int reg) {
     if (local >= 0) {
         // If it's a signal, emit SIGNAL_GET to read its value and track dependencies
         if (signal_set_.count(node->name)) {
+            clear_reg_type(reg); // signal value type unknown
             emit(op_byte(Opcode::SIGNAL_GET), reg, local, 0);
         } else {
+            // Propagate known type from local register
+            set_reg_type(reg, get_reg_type(local));
             emit(op_byte(Opcode::MOVE), reg, local, 0);
         }
         return;
@@ -320,11 +327,13 @@ void CodeGenerator::compile_identifier(Identifier* node, int reg) {
     int upvalue = resolve_upvalue(node->name);
     if (upvalue >= 0) {
         if (signal_set_.count(node->name)) {
+            clear_reg_type(reg);
             int sig_reg = alloc_register();
             emit(op_byte(Opcode::GET_UPVALUE), sig_reg, upvalue, 0);
             emit(op_byte(Opcode::SIGNAL_GET), reg, sig_reg, 0);
             free_register(); // sig_reg
         } else {
+            clear_reg_type(reg); // upvalue type unknown at compile time
             emit(op_byte(Opcode::GET_UPVALUE), reg, upvalue, 0);
         }
         return;
@@ -332,11 +341,13 @@ void CodeGenerator::compile_identifier(Identifier* node, int reg) {
     // Global: check if it's a signal
     uint16_t name_const = make_identifier_constant(node->name);
     if (signal_set_.count(node->name)) {
+        clear_reg_type(reg);
         int sig_reg = alloc_register();
         emit_bx(op_byte(Opcode::GET_GLOBAL), sig_reg, name_const);
         emit(op_byte(Opcode::SIGNAL_GET), reg, sig_reg, 0);
         free_register(); // sig_reg
     } else {
+        clear_reg_type(reg); // global type unknown at compile time
         emit_bx(op_byte(Opcode::GET_GLOBAL), reg, name_const);
     }
 }
@@ -369,6 +380,7 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
                 mod_right = compile_expr(left_bin->right);
             }
             emit(op_byte(Opcode::MOD_EQ_ZERO), reg, mod_left, mod_right);
+            set_reg_type(reg, RegType::Bool); // MOD_EQ_ZERO always produces a bool
             if (!mr_local) free_register();
             if (!ml_local) free_register();
             return;
@@ -421,6 +433,51 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
     else if (node->op == ">=") op = Opcode::GTE;
     else throw std::runtime_error("Unknown binary operator: " + node->op);
 
+    // Compile-time type specialization: emit type-specific opcodes when types are known
+    RegType lt = get_reg_type(left);
+    RegType rt = get_reg_type(right);
+    bool both_num = (lt == RegType::Number && rt == RegType::Number);
+    bool both_str = (lt == RegType::String && rt == RegType::String);
+
+    if (both_num) {
+        // Emit specialized numeric opcode (skips runtime type checks + quickening)
+        switch (op) {
+            case Opcode::ADD: op = Opcode::ADD_NUM; break;
+            case Opcode::SUB: op = Opcode::SUB_NUM; break;
+            case Opcode::MUL: op = Opcode::MUL_NUM; break;
+            case Opcode::DIV: op = Opcode::DIV_NUM; break;
+            case Opcode::MOD: op = Opcode::MOD_NUM; break;
+            case Opcode::EQ:  op = Opcode::EQ_NUM;  break;
+            case Opcode::NEQ: op = Opcode::NEQ_NUM; break;
+            case Opcode::LT:  op = Opcode::LT_NUM;  break;
+            case Opcode::LTE: op = Opcode::LTE_NUM; break;
+            case Opcode::GT:  op = Opcode::GT_NUM;  break;
+            case Opcode::GTE: op = Opcode::GTE_NUM; break;
+            default: break;
+        }
+    } else if (both_str && op == Opcode::ADD) {
+        op = Opcode::ADD_STR;
+    }
+
+    // Track result type
+    if (op == Opcode::ADD_STR) {
+        set_reg_type(reg, RegType::String);
+    } else if (both_num || both_str) {
+        // Arithmetic on numbers → Number; comparisons → Bool
+        if (op == Opcode::EQ_NUM || op == Opcode::NEQ_NUM ||
+            op == Opcode::LT_NUM || op == Opcode::LTE_NUM ||
+            op == Opcode::GT_NUM || op == Opcode::GTE_NUM ||
+            op == Opcode::EQ || op == Opcode::NEQ ||
+            op == Opcode::LT || op == Opcode::LTE ||
+            op == Opcode::GT || op == Opcode::GTE) {
+            set_reg_type(reg, RegType::Bool);
+        } else {
+            set_reg_type(reg, RegType::Number);
+        }
+    } else {
+        clear_reg_type(reg);
+    }
+
     emit(op_byte(op), reg, left, right);
     if (!right_is_local) free_register();
     if (!left_is_local) free_register();
@@ -429,8 +486,10 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
 void CodeGenerator::compile_unary(UnaryExpr* node, int reg) {
     int operand = compile_expr(node->operand);
     if (node->op == "-") {
+        set_reg_type(reg, RegType::Number);
         emit(op_byte(Opcode::NEG), reg, operand, 0);
     } else if (node->op == "!" || node->op == "not") {
+        set_reg_type(reg, RegType::Bool);
         emit(op_byte(Opcode::NOT), reg, operand, 0);
     }
     free_register(); // operand
@@ -547,6 +606,7 @@ void CodeGenerator::compile_field_set(FieldSetExpr* node, int reg) {
     int val = compile_expr(node->value);
     uint16_t field_const = make_identifier_constant(node->field);
     emit(op_byte(Opcode::SET_FIELD), obj, field_const, val);
+    set_reg_type(reg, get_reg_type(val));
     emit(op_byte(Opcode::MOVE), reg, val, 0);
     free_register(); // val
     free_register(); // obj
@@ -606,6 +666,24 @@ void CodeGenerator::compile_assignment(AssignmentExpr* node, int reg) {
                 else if (bin->op == "/") op = Opcode::DIV;
                 else if (bin->op == "%") op = Opcode::MOD;
                 else goto fallback;
+
+                // Type-specialize the in-place op if types are known
+                {
+                    RegType lt = get_reg_type(local);
+                    RegType rt = right_is_local ? get_reg_type(right) : get_reg_type(right);
+                    if (lt == RegType::Number && rt == RegType::Number) {
+                        switch (op) {
+                            case Opcode::ADD: op = Opcode::ADD_NUM; break;
+                            case Opcode::SUB: op = Opcode::SUB_NUM; break;
+                            case Opcode::MUL: op = Opcode::MUL_NUM; break;
+                            case Opcode::DIV: op = Opcode::DIV_NUM; break;
+                            case Opcode::MOD: op = Opcode::MOD_NUM; break;
+                            default: break;
+                        }
+                        // Result stays Number
+                    }
+                }
+
                 // Emit: OP local, local, right (in-place update)
                 emit(op_byte(op), local, local, right);
                 if (!right_is_local) free_register();
@@ -619,7 +697,10 @@ fallback:
     int val = compile_expr(node->value);
     int local = resolve_local(node->name);
     if (local >= 0) {
+        // Propagate type from value to local register
+        set_reg_type(local, get_reg_type(val));
         emit(op_byte(Opcode::MOVE), local, val, 0);
+        set_reg_type(reg, get_reg_type(val));
         emit(op_byte(Opcode::MOVE), reg, val, 0);
         free_register(); // val
         return;
@@ -642,6 +723,7 @@ void CodeGenerator::compile_array_index_set(ArrayIndexSetExpr* node, int reg) {
     int idx = compile_expr(node->index);
     int val = compile_expr(node->value);
     emit(op_byte(Opcode::SET_INDEX), obj, idx, val);
+    set_reg_type(reg, get_reg_type(val));
     emit(op_byte(Opcode::MOVE), reg, val, 0);
     free_register(); // val
     free_register(); // idx
@@ -1233,6 +1315,8 @@ int CodeGenerator::alloc_register() {
     if (current_scope_->next_register > current_scope_->max_registers) {
         current_scope_->max_registers = current_scope_->next_register;
     }
+    // Clear any stale type info from previous use of this register
+    clear_reg_type(reg);
     return reg;
 }
 
