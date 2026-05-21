@@ -123,6 +123,7 @@ private:
 
     // Signal support: track which variables are signals
     std::set<std::string> signal_set_;
+    std::vector<std::vector<std::string>> signal_scope_stack_; // per-scope signal names for cleanup
 
     // Enum support: track enum type IDs
     uint16_t enum_type_id_counter_ = 0;

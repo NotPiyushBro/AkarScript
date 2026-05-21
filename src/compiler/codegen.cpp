@@ -345,7 +345,7 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
             if (left_bin->left->type == NodeType::Identifier) {
                 auto* id = static_cast<Identifier*>(left_bin->left.get());
                 int local = resolve_local(id->name);
-                if (local >= 0) { mod_left = local; ml_local = true; }
+                if (local >= 0 && !signal_set_.count(id->name)) { mod_left = local; ml_local = true; }
                 else mod_left = compile_expr(left_bin->left);
             } else {
                 mod_left = compile_expr(left_bin->left);
@@ -355,7 +355,7 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
             if (left_bin->right->type == NodeType::Identifier) {
                 auto* id = static_cast<Identifier*>(left_bin->right.get());
                 int local = resolve_local(id->name);
-                if (local >= 0) { mod_right = local; mr_local = true; }
+                if (local >= 0 && !signal_set_.count(id->name)) { mod_right = local; mr_local = true; }
                 else mod_right = compile_expr(left_bin->right);
             } else {
                 mod_right = compile_expr(left_bin->right);
@@ -368,12 +368,13 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
     }
 
     // Optimization: use local registers directly instead of allocating temps + MOVEs
+    // But NOT for signals — signals need SIGNAL_GET to read their value
     int left;
     bool left_is_local = false;
     if (node->left->type == NodeType::Identifier) {
         auto* id = static_cast<Identifier*>(node->left.get());
         int local = resolve_local(id->name);
-        if (local >= 0) {
+        if (local >= 0 && !signal_set_.count(id->name)) {
             left = local;
             left_is_local = true;
         } else {
@@ -388,7 +389,7 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
     if (node->right->type == NodeType::Identifier) {
         auto* id = static_cast<Identifier*>(node->right.get());
         int local = resolve_local(id->name);
-        if (local >= 0) {
+        if (local >= 0 && !signal_set_.count(id->name)) {
             right = local;
             right_is_local = true;
         } else {
@@ -1238,6 +1239,7 @@ int CodeGenerator::current_register() const {
 // Scope management
 void CodeGenerator::begin_scope() {
     current_scope_->scope_depth++;
+    signal_scope_stack_.push_back({}); // track signals declared in this scope
 }
 
 void CodeGenerator::end_scope() {
@@ -1250,6 +1252,13 @@ void CodeGenerator::end_scope() {
         }
         locals.pop_back();
         free_register();
+    }
+    // Remove signals declared in this scope from signal_set_
+    if (!signal_scope_stack_.empty()) {
+        for (auto& name : signal_scope_stack_.back()) {
+            signal_set_.erase(name);
+        }
+        signal_scope_stack_.pop_back();
     }
 }
 
@@ -1414,11 +1423,15 @@ void CodeGenerator::compile_signal_decl(SignalDeclStmt* node) {
     signal_set_.insert(node->name);
 
     if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
-        // Top-level: set as global
+        // Top-level: set as global (signal stays in signal_set_ permanently)
         uint16_t name_const = make_identifier_constant(node->name);
         emit_bx(op_byte(Opcode::SET_GLOBAL), reg, name_const);
         free_register();
     } else {
+        // Local signal: register for scope cleanup
+        if (!signal_scope_stack_.empty()) {
+            signal_scope_stack_.back().push_back(node->name);
+        }
         // reg is already allocated by compile_expr, use it directly as the local
         declare_local(node->name, reg);
     }
