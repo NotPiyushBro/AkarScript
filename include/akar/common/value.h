@@ -7,6 +7,7 @@
 #include <memory>
 #include <cstring>
 #include <cmath>
+#include "akar/common/smallvec.h"
 
 namespace akar {
 
@@ -291,21 +292,27 @@ inline uint16_t enum_variant_index(Value v) {
 }
 
 // Signal: reactive value container with dependency tracking
+// Uses SmallVec for subscribers — most signals have 1-3 effects watching them.
+// Inline buffer of 4 avoids heap allocation for the common case.
 struct ObjSignal : Obj {
-    Value value;                        // current value
-    std::vector<ObjEffect*> subscribers; // effects that depend on this signal
-    std::string name;                   // debug name
+    Value value;                              // current value
+    SmallVec<ObjEffect*, 4> subscribers;      // effects that depend on this signal
+    uint32_t write_generation = 0;            // incremented on each write (for dedup)
+    std::string name;                         // debug name
 
     ObjSignal() { type = ObjType::Signal; alloc_size = sizeof(ObjSignal); }
 };
 
 // Effect: auto-running reactive block (executed as a mini-fiber)
+// Uses SmallVec for dependencies — most effects depend on 1-5 signals.
+// Inline buffer of 4 avoids heap allocation for the common case.
 struct ObjEffect : Obj {
-    enum class State { Idle, Queued, Running };
+    enum class State : uint8_t { Idle, Queued, Running };
     State state = State::Idle;
-    ObjClosure* body = nullptr;         // the effect's closure
-    std::vector<ObjSignal*> dependencies; // signals this effect reads
-    std::string name;                   // debug name
+    ObjClosure* body = nullptr;               // the effect's closure
+    SmallVec<ObjSignal*, 6> dependencies;     // signals this effect reads
+    uint32_t last_queued_gen = 0;             // last generation when queued (dedup)
+    std::string name;                         // debug name
 
     ObjEffect() { type = ObjType::Effect; alloc_size = sizeof(ObjEffect); }
 };

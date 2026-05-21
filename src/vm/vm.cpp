@@ -383,10 +383,10 @@ InterpretResult VM::run() {
             if (__builtin_expect(profiler_.is_profiling(), 0)) {
                 profiler_.record_effect_run(eff->name.c_str(), true);
             }
-            // Clear old dependencies
+            // Clear old dependencies — remove this effect from each old signal's subscribers
+            // Uses SmallVec::erase() which is O(1) swap-remove (unordered)
             for (auto* old_sig : eff->dependencies) {
-                auto& subs = old_sig->subscribers;
-                subs.erase(std::remove(subs.begin(), subs.end(), eff), subs.end());
+                old_sig->subscribers.erase(eff);
             }
             eff->dependencies.clear();
             current_effect_ = eff;
@@ -2383,19 +2383,13 @@ InterpretResult VM::run() {
         auto* sig = sig_val.as_signal();
         S(a) = sig->value;
         // Track dependency if inside an effect
-        if (current_effect_) {
-            // Check if already subscribed
-            bool found = false;
-            for (auto* dep : current_effect_->dependencies) {
-                if (dep == sig) { found = true; break; }
-            }
-            if (!found) {
-                current_effect_->dependencies.push_back(sig);
-                sig->subscribers.push_back(current_effect_);
-                // Profiler: record signal read (only when tracking dependency)
-                if (__builtin_expect(profiler_.is_profiling(), 0)) {
-                    profiler_.record_signal_read(sig->name.c_str());
-                }
+        // Uses SmallVec::contains() — fast linear scan for 1-5 deps (inline buffer)
+        if (current_effect_ && !current_effect_->dependencies.contains(sig)) {
+            current_effect_->dependencies.push_back(sig);
+            sig->subscribers.push_back(current_effect_);
+            // Profiler: record signal read (only when tracking dependency)
+            if (__builtin_expect(profiler_.is_profiling(), 0)) {
+                profiler_.record_signal_read(sig->name.c_str());
             }
         }
         DISPATCH();
@@ -2411,15 +2405,22 @@ InterpretResult VM::run() {
         }
         auto* sig = sig_val.as_signal();
         sig->value = S(b);
+        // Increment write generation (for effect dedup)
+        sig->write_generation = ++write_generation_;
         // Profiler: record signal write
         if (__builtin_expect(profiler_.is_profiling(), 0)) {
             profiler_.record_signal_write(sig->name.c_str());
         }
         // Queue dependent effects for re-execution
-        for (auto* eff : sig->subscribers) {
-            if (eff->state != ObjEffect::State::Queued && eff->body) {
-                eff->state = ObjEffect::State::Queued;
-                effect_queue_.push_back(eff);
+        // Uses generation counter for O(1) dedup instead of checking state
+        {
+            uint32_t gen = sig->write_generation;
+            for (auto* eff : sig->subscribers) {
+                if (eff->last_queued_gen != gen && eff->body) {
+                    eff->last_queued_gen = gen;
+                    eff->state = ObjEffect::State::Queued;
+                    effect_queue_.push_back(eff);
+                }
             }
         }
         DISPATCH();
@@ -2453,10 +2454,9 @@ InterpretResult VM::run() {
             profiler_.record_effect_run(eff->name.c_str(), false);
         }
 
-        // Clear old dependencies
+        // Clear old dependencies — O(1) swap-remove via SmallVec
         for (auto* old_sig : eff->dependencies) {
-            auto& subs = old_sig->subscribers;
-            subs.erase(std::remove(subs.begin(), subs.end(), eff), subs.end());
+            old_sig->subscribers.erase(eff);
         }
         eff->dependencies.clear();
         eff->state = ObjEffect::State::Running;

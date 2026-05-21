@@ -100,6 +100,7 @@ public:
     int effect_frame_depth_ = 0;           // frame depth when effect was entered
     std::deque<ObjEffect*> effect_queue_; // effects to re-run after current instruction
     uint16_t enum_type_counter_ = 0;      // global enum type ID counter
+    uint32_t write_generation_ = 0;        // global write generation counter (for effect dedup)
 
 private:
     InterpretResult run();
