@@ -240,8 +240,14 @@ void CodeGenerator::compile_stmt(const ASTPtr& node) {
 }
 
 void CodeGenerator::compile_number(NumberLiteral* node, int reg) {
-    uint16_t cx = make_constant(Value(node->value));
-    emit_bx(op_byte(Opcode::LOAD_CONST), reg, cx);
+    // Use LOAD_IMM for small non-negative integers (0-255)
+    double v = node->value;
+    if (v >= 0 && v <= 255 && v == std::floor(v)) {
+        emit(op_byte(Opcode::LOAD_IMM), reg, static_cast<int>(v), 0);
+    } else {
+        uint16_t cx = make_constant(Value(v));
+        emit_bx(op_byte(Opcode::LOAD_CONST), reg, cx);
+    }
 }
 
 void CodeGenerator::compile_string(StringLiteral* node, int reg) {
@@ -1529,6 +1535,7 @@ static int opcode_dest_reg(uint8_t op) {
         case Opcode::SIGNAL_CREATE: case Opcode::SIGNAL_GET:
         case Opcode::EFFECT_CREATE:
         case Opcode::ENUM_CREATE: case Opcode::ENUM_GET: case Opcode::ENUM_IS:
+        case Opcode::LOAD_IMM:
             return 0; // A is destination
         default:
             return -1; // doesn't write to A, or is a control flow op

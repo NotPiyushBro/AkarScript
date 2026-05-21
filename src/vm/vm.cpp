@@ -311,6 +311,8 @@ InterpretResult VM::run() {
         &&op_EQ_NUM, &&op_NEQ_NUM, &&op_LT_NUM, &&op_LTE_NUM, &&op_GT_NUM, &&op_GTE_NUM,
         // Fused opcodes
         &&op_MOD_EQ_ZERO,
+        // Small integer inline
+        &&op_LOAD_IMM,
         // Fiber/coroutine
         &&op_FIBER_YIELD, &&op_FIBER_RESUME,
         // Tail call, await, exception
@@ -707,6 +709,11 @@ InterpretResult VM::run() {
     CASE(MOD_EQ_ZERO): {
         uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
         S(a) = Value(std::fmod(S(b).get_number(), S(c).get_number()) == 0.0);
+        DISPATCH();
+    }
+    CASE(LOAD_IMM): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4;
+        S(a) = Value(static_cast<double>(b));
         DISPATCH();
     }
     CASE(NOT): {
@@ -2371,6 +2378,9 @@ InterpretResult VM::run() {
             case Opcode::HALT:
                 return InterpretResult::Ok;
             case Opcode::NOP:
+                break;
+            case Opcode::LOAD_IMM:
+                S(wa) = Value(static_cast<double>(wb));
                 break;
             default:
                 runtime_error("Opcode %d cannot be used with WIDE prefix", wide_op);

@@ -18,7 +18,7 @@ static const char* op_names[] = {
     "ITER_INIT","ITER_NEXT","ITER_DONE","PRINT","HALT","NOP",
     "ADD_NUM","SUB_NUM","MUL_NUM","DIV_NUM","MOD_NUM","ADD_STR",
     "EQ_NUM","NEQ_NUM","LT_NUM","LTE_NUM","GT_NUM","GTE_NUM",
-    "MOD_EQ_ZERO","FIBER_YIELD","FIBER_RESUME","TAIL_CALL","AWAIT",
+    "MOD_EQ_ZERO","LOAD_IMM","FIBER_YIELD","FIBER_RESUME","TAIL_CALL","AWAIT",
     "THROW","TRY_BEGIN","TRY_END","WIDE",
     "SIGNAL_CREATE","SIGNAL_GET","SIGNAL_SET",
     "EFFECT_CREATE","EFFECT_RUN",
@@ -181,26 +181,27 @@ static void disasm(const std::string& label, const std::vector<uint8_t>& bc,
         case 58: printf("%s  %4zu: GT_NUM        R%u = R%u > R%u\n",pad.c_str(),addr,a,b,c); break;
         case 59: printf("%s  %4zu: GTE_NUM       R%u = R%u >= R%u\n",pad.c_str(),addr,a,b,c); break;
         case 60: printf("%s  %4zu: MOD_EQ_ZERO   R%u = (R%u %% R%u == 0)\n",pad.c_str(),addr,a,b,c); break;
-        case 61: printf("%s  %4zu: FIBER_YIELD   R%u\n",pad.c_str(),addr,a); break;
-        case 62: printf("%s  %4zu: FIBER_RESUME  R%u R%u R%u\n",pad.c_str(),addr,a,b,c); break;
-        case 63: printf("%s  %4zu: TAIL_CALL     R%u %u args\n",pad.c_str(),addr,a,b); break;
-        case 64: printf("%s  %4zu: AWAIT         R%u\n",pad.c_str(),addr,a); break;
-        case 65: printf("%s  %4zu: THROW         R%u\n",pad.c_str(),addr,a); break;
-        case 66: printf("%s  %4zu: TRY_BEGIN     R%u %+d -> %zu\n",pad.c_str(),addr,a,sbx,(size_t)(addr+4+sbx)); break;
-        case 67: printf("%s  %4zu: TRY_END       %u\n",pad.c_str(),addr,bx); break;
-        case 68: printf("%s  %4zu: WIDE\n",pad.c_str(),addr); break;
-        case 69: printf("%s  %4zu: SIGNAL_CREATE R%u <- R%u\n",pad.c_str(),addr,a,b); break;
-        case 70: printf("%s  %4zu: SIGNAL_GET    R%u <- sig[R%u]\n",pad.c_str(),addr,a,b); break;
-        case 71: printf("%s  %4zu: SIGNAL_SET    sig[R%u] <- R%u\n",pad.c_str(),addr,a,b); break;
-        case 72: printf("%s  %4zu: EFFECT_CREATE R%u <- effect(R%u)\n",pad.c_str(),addr,a,b); break;
-        case 73: printf("%s  %4zu: EFFECT_RUN    R%u\n",pad.c_str(),addr,a); break;
-        case 74: printf("%s  %4zu: %-14s R%-3u #%-3u %s\n",pad.c_str(),addr,"ENUM_CREATE",a,bx,
+        case 61: printf("%s  %4zu: LOAD_IMM      R%u <- %u\n",pad.c_str(),addr,a,b); break;
+        case 62: printf("%s  %4zu: FIBER_YIELD   R%u\n",pad.c_str(),addr,a); break;
+        case 63: printf("%s  %4zu: FIBER_RESUME  R%u R%u R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 64: printf("%s  %4zu: TAIL_CALL     R%u %u args\n",pad.c_str(),addr,a,b); break;
+        case 65: printf("%s  %4zu: AWAIT         R%u\n",pad.c_str(),addr,a); break;
+        case 66: printf("%s  %4zu: THROW         R%u\n",pad.c_str(),addr,a); break;
+        case 67: printf("%s  %4zu: TRY_BEGIN     R%u %+d -> %zu\n",pad.c_str(),addr,a,sbx,(size_t)(addr+4+sbx)); break;
+        case 68: printf("%s  %4zu: TRY_END       %u\n",pad.c_str(),addr,bx); break;
+        case 69: printf("%s  %4zu: WIDE\n",pad.c_str(),addr); break;
+        case 70: printf("%s  %4zu: SIGNAL_CREATE R%u <- R%u\n",pad.c_str(),addr,a,b); break;
+        case 71: printf("%s  %4zu: SIGNAL_GET    R%u <- sig[R%u]\n",pad.c_str(),addr,a,b); break;
+        case 72: printf("%s  %4zu: SIGNAL_SET    sig[R%u] <- R%u\n",pad.c_str(),addr,a,b); break;
+        case 73: printf("%s  %4zu: EFFECT_CREATE R%u <- effect(R%u)\n",pad.c_str(),addr,a,b); break;
+        case 74: printf("%s  %4zu: EFFECT_RUN    R%u\n",pad.c_str(),addr,a); break;
+        case 75: printf("%s  %4zu: %-14s R%-3u #%-3u %s\n",pad.c_str(),addr,"ENUM_CREATE",a,bx,
             (bx<consts.size())?fmt(consts[bx],strs).c_str():"?"); break;
-        case 75: printf("%s  %4zu: ENUM_VARIANT  R%u  #%u  #%u\n",pad.c_str(),addr,a,b,c); break;
-        case 76: printf("%s  %4zu: ENUM_DATA_VAR R%u  #%u\n",pad.c_str(),addr,a,b); break;
-        case 77: printf("%s  %4zu: ENUM_GET      R%u = R%u.%s\n",pad.c_str(),addr,a,b,
+        case 76: printf("%s  %4zu: ENUM_VARIANT  R%u  #%u  #%u\n",pad.c_str(),addr,a,b,c); break;
+        case 77: printf("%s  %4zu: ENUM_DATA_VAR R%u  #%u\n",pad.c_str(),addr,a,b); break;
+        case 78: printf("%s  %4zu: ENUM_GET      R%u = R%u.%s\n",pad.c_str(),addr,a,b,
             (c<consts.size())?fmt(consts[c],strs).c_str():"?"); break;
-        case 78: printf("%s  %4zu: ENUM_IS       R%u = is_enum(R%u, %s)\n",pad.c_str(),addr,a,b,
+        case 79: printf("%s  %4zu: ENUM_IS       R%u = is_enum(R%u, %s)\n",pad.c_str(),addr,a,b,
             (c<consts.size())?fmt(consts[c],strs).c_str():"?"); break;
         default: printf("%s  %4zu: ???(%u) R%u R%u R%u\n",pad.c_str(),addr,op,a,b,c); break;
         }

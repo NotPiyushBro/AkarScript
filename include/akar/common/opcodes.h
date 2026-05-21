@@ -99,6 +99,9 @@ enum class Opcode : uint8_t {
     // Compiler-emitted fused opcodes (reduce dispatch in hot loops)
     MOD_EQ_ZERO,    // A = (R[B] % R[C] == 0) — fuses MOD + EQ + zero check into 1 opcode
 
+    // Small integer inline encoding
+    LOAD_IMM,       // A = B (immediate 8-bit value, 0-255) — no constant table lookup
+
     // Fiber/Coroutine
     FIBER_YIELD,    // yield R[A] from current fiber, resume value goes to R[A]
     FIBER_RESUME,   // resume fiber R[B], pass R[C] as resume value, result in R[A]
