@@ -95,6 +95,11 @@ public:
     // Skip native call on fiber resume (CALL handler checks this)
     bool skip_native_call_ = false;
     Value skip_native_result_;
+    // Direct fiber resume: when set, the next fiber_yield in the CALL handler
+    // skips the yield and returns the resume value. More reliable than skip_native_call_
+    // for interleaved fibers.
+    bool fiber_resuming_ = false;
+    Value fiber_resume_value_;
 
     // Signal/Effect tracking
     ObjEffect* current_effect_ = nullptr;  // currently executing effect (for dependency tracking)

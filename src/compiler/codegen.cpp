@@ -1826,11 +1826,22 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
 
         if (is_jump_opcode(op)) {
             int16_t old_offset = static_cast<int16_t>((bytecode[i + 2] << 8) | bytecode[i + 3]);
-            size_t old_target = static_cast<size_t>(static_cast<int64_t>(i) + 4 + old_offset);
+            // JMP does ip += offset (relative to JMP position)
+            // JMP_IF_FALSE/TRUE do ip += 4; ... ip += offset (relative to next instruction)
+            // TRY_BEGIN does ip += 4; ... catch_ip = ip + offset
+            size_t old_target;
+            int base_adjust;
+            if (static_cast<Opcode>(op) == Opcode::JMP) {
+                old_target = static_cast<size_t>(static_cast<int64_t>(i) + old_offset);
+                base_adjust = 0;
+            } else {
+                old_target = static_cast<size_t>(static_cast<int64_t>(i) + 4 + old_offset);
+                base_adjust = 4;
+            }
             if (old_target < len) {
                 size_t new_target = old_to_new[old_target];
                 size_t new_source = old_to_new[i];
-                int16_t new_offset = static_cast<int16_t>(new_target - new_source - 4);
+                int16_t new_offset = static_cast<int16_t>(new_target - new_source - base_adjust);
                 bytecode[i + 2] = (new_offset >> 8) & 0xFF;
                 bytecode[i + 3] = new_offset & 0xFF;
             }

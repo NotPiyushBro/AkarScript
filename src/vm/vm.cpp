@@ -63,6 +63,7 @@ void VM::mark_roots() {
     // Mark resume value and skip_native_result (can hold object references during fiber ops)
     gc_mark_value(resume_value_);
     gc_mark_value(skip_native_result_);
+    gc_mark_value(fiber_resume_value_);
     // Mark active fiber and pending resume fiber
     if (active_fiber_) {
         gc_mark_object(static_cast<Obj*>(active_fiber_));
@@ -967,6 +968,12 @@ InterpretResult VM::run() {
         } else if (callee.is_native()) {
             // Special case: fiber_yield - handle directly without calling native
             if (active_fiber_ && callee.as_native()->name == "fiber_yield") {
+                // Check if we just resumed this fiber — skip the yield and return resume value
+                if (fiber_resuming_) {
+                    fiber_resuming_ = false;
+                    S(a) = fiber_resume_value_;
+                    DISPATCH();
+                }
                 ObjFiber* fib = active_fiber_;
                 // Get the yield value from the first argument
                 Value yval = (arg_count >= 1) ? stack_[callee_abs + 1] : Value();
@@ -1063,12 +1070,10 @@ InterpretResult VM::run() {
                     active_fiber_ = fib;
 
                     resume_has_value_ = false;
-                    // The IP points to the CALL instruction. The script will
-                    // re-enter the CALL handler. Set skip_native_call_ so the native
-                    // isn't called again. Place the resume value at callee_abs
-                    // (this is what `let step = fiber_yield(x)` receives as `step`).
-                    skip_native_call_ = true;
-                    skip_native_result_ = resume_value_;
+                    // Set fiber_resuming_ flag so the fiber_yield special handler
+                    // skips the yield and returns the resume value directly.
+                    fiber_resuming_ = true;
+                    fiber_resume_value_ = resume_value_;
                     REFRESH_FRAME();
                 } else if (fib->state == ObjFiber::State::Created) {
                     // Start the fiber for the first time
@@ -1721,6 +1726,11 @@ InterpretResult VM::run() {
     CASE(FIBER_YIELD): {
         uint8_t a = ip[1];
         ip += 4;
+        if (fiber_resuming_) {
+            fiber_resuming_ = false;
+            S(a) = fiber_resume_value_;
+            DISPATCH();
+        }
         if (skip_native_call_) {
             skip_native_call_ = false;
             S(a) = skip_native_result_;
@@ -1789,9 +1799,10 @@ InterpretResult VM::run() {
             fiber->resume_return_reg = a;
             active_fiber_ = fiber;
 
-            // Set up resume value to be returned by the yield call
-            skip_native_call_ = true;
-            skip_native_result_ = resume_val;
+            // Set up resume value to be returned by the yield call.
+            // Use fiber_resuming_ flag so the fiber_yield handler skips the yield.
+            fiber_resuming_ = true;
+            fiber_resume_value_ = resume_val;
 
             REFRESH_FRAME();
             DISPATCH();
@@ -2267,6 +2278,11 @@ InterpretResult VM::run() {
                 break;
             }
             case Opcode::FIBER_YIELD: {
+                if (fiber_resuming_) {
+                    fiber_resuming_ = false;
+                    S(wa) = fiber_resume_value_;
+                    break;
+                }
                 if (skip_native_call_) {
                     skip_native_call_ = false;
                     S(wa) = skip_native_result_;
@@ -2325,8 +2341,8 @@ InterpretResult VM::run() {
                     fiber->parent = active_fiber_;
                     fiber->resume_return_reg = wa;
                     active_fiber_ = fiber;
-                    skip_native_call_ = true;
-                    skip_native_result_ = resume_val;
+                    fiber_resuming_ = true;
+                    fiber_resume_value_ = resume_val;
                     REFRESH_FRAME();
                     break;
                 }
