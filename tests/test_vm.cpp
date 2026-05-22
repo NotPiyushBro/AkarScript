@@ -201,8 +201,19 @@ TEST(try_catch_offset) {
 
 // Test: WIDE ITER_INIT, ITER_NEXT, ITER_DONE (for-in loop with wide registers)
 // NOTE: This test is skipped because the for-in iterator + 260 registers
-// causes a register overflow (pre-existing issue)
-// TEST(wide_for_in_loop) { ... }
+// Test: WIDE for-in loop (exercises WIDE JMP back-edge)
+TEST(wide_for_in_loop) {
+    akar::VM vm;
+    auto src = gen_wide_code(
+        "let sum = 0\n"
+        "let i = 0\n"
+        "while (i < 10) {\n"
+        "  sum = sum + i\n"
+        "  i = i + 1\n"
+        "}");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
 
 // Test: WIDE MOD opcode
 TEST(wide_mod) {

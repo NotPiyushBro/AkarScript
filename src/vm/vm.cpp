@@ -1999,9 +1999,11 @@ InterpretResult VM::run() {
             }
             case Opcode::JMP: {
                 int16_t offset = static_cast<int16_t>((wb << 8) | wc);
-                // patch_jump subtracts 4 for WIDE, but JMP callers don't subtract INST_SIZE
-                // so we need to add INST_SIZE back to compensate
-                ip = wip + INST_SIZE + offset;
+                ip += offset;  // ip already advanced by WIDE_INST_SIZE at top of handler
+                if (offset < 0) {
+                    CHECK_MEMORY_LIMIT();
+                    if (yield_pending_) HANDLE_FIBER_YIELD();
+                }
                 break;
             }
             case Opcode::JMP_IF_FALSE: {
