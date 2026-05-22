@@ -43,6 +43,20 @@ static int64_t jit_mod_eq_zero(double a, double b) {
 static constexpr int64_t NIL_BITS   = 0x7FFC000000000000LL;
 static constexpr int64_t FALSE_BITS = 0x7FF8000000000001LL;
 static constexpr int64_t TRUE_BITS  = 0x7FF8000000000002LL;
+static constexpr uint64_t NAN_BASE  = 0x7FF8000000000000ULL;
+
+// Helper: returns TRUE_BITS if value is truthy, FALSE_BITS otherwise
+static int64_t jit_is_truthy(int64_t bits) {
+    uint64_t b = static_cast<uint64_t>(bits);
+    if (b == FALSE_BITS || b == NIL_BITS) return FALSE_BITS;
+    if (b == TRUE_BITS) return TRUE_BITS;
+    // For objects: non-nil objects are truthy
+    // NaN-boxed objects have (bits & NAN_BASE) == NAN_BASE and bit 51 set
+    if ((b & NAN_BASE) == NAN_BASE && (b & 0x0008000000000000ULL)) return TRUE_BITS;
+    // Numbers: 0 is truthy in Akar (not like C)
+    if ((b & NAN_BASE) != NAN_BASE) return TRUE_BITS; // it's a number
+    return FALSE_BITS; // NaN (canonical) — shouldn't happen
+}
 
 // ============================================================
 // JITCompiler
@@ -241,9 +255,27 @@ bool JITCompiler::compile_instruction(int& pc) {
         break;
     }
 
-    case Opcode::NOT:
-        emit_bailout(start_pc);
-        return false;
+    case Opcode::NOT: {
+        // Call jit_is_truthy, then negate
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_call_indirect(reinterpret_cast<void*>(&jit_is_truthy));
+        // Result in X0: TRUE_BITS or FALSE_BITS. Negate by swapping.
+        // Load TRUE_BITS, compare, if equal store FALSE, else store TRUE
+        b->emit_load_imm64(R1, static_cast<uint64_t>(TRUE_BITS));
+        b->emit_cmp(R0, R1);
+        size_t was_true = b->emit_branch_cond(b->cond_eq(), 0);
+        // Was false/nil → store TRUE
+        b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS));
+        size_t skip = b->emit_branch(0);
+        size_t false_pos = b->code_size();
+        // Was true → store FALSE
+        b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS));
+        size_t end_pos = b->code_size();
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        b->patch_branch(was_true, false_pos);
+        b->patch_branch(skip, end_pos);
+        break;
+    }
 
     // --- Branches ---
 
@@ -276,9 +308,27 @@ bool JITCompiler::compile_instruction(int& pc) {
         break;
     }
 
-    case Opcode::JMP_IF_TRUE:
-        emit_bailout(start_pc);
-        return false;
+    case Opcode::JMP_IF_TRUE: {
+        int target_pc = pc + sbx;
+        // For boolean results: check if NOT false and NOT nil → jump
+        b->emit_load_int(R0, b->reg_base(), slot_offset(a));
+        // Check FALSE_VAL — if false, don't jump (fall through)
+        b->emit_load_imm64(R1, static_cast<uint64_t>(FALSE_BITS));
+        b->emit_cmp(R0, R1);
+        size_t false_skip = b->emit_branch_cond(b->cond_eq(), 0);  // skip if false
+        // Check NIL_VAL — if nil, don't jump (fall through)
+        b->emit_load_imm64(R1, static_cast<uint64_t>(NIL_BITS));
+        b->emit_cmp(R0, R1);
+        size_t nil_skip = b->emit_branch_cond(b->cond_eq(), 0);    // skip if nil
+        // Truthy → jump to target
+        size_t truthy_br = b->emit_branch(0);
+        fixups_.push_back({truthy_br, target_pc, 0});
+        // False/nil fall through — patch skips to here
+        size_t fallthrough = b->code_size();
+        b->patch_branch(false_skip, fallthrough);
+        b->patch_branch(nil_skip, fallthrough);
+        break;
+    }
 
     // --- Fused compare-branch ---
     // Interpreter advances ip by 4 first, then applies offset: target = (pc) + c8
@@ -301,10 +351,23 @@ bool JITCompiler::compile_instruction(int& pc) {
 
     #undef EMIT_FUSED_CMP_BRANCH
 
-    // --- Return: bail ---
-    case Opcode::RETURN:
-        emit_bailout(start_pc);
-        return false;
+    // --- Return: store result at stack[callee_pos], return Done ---
+    case Opcode::RETURN: {
+        // Load return value from stack[base + a] into R0
+        b->emit_load_int(R0, b->reg_base(), slot_offset(a));
+        // Compute &stack_[callee_pos] = R_STACK + callee_pos * 8
+        // callee_pos is in R_CALLEE (X23). Multiply by 8 via 3 doublings.
+        b->emit_add(b->scratch1(), b->reg_callee(), b->reg_callee()); // ×2
+        b->emit_add(b->scratch1(), b->scratch1(), b->scratch1());     // ×4
+        b->emit_add(b->scratch1(), b->scratch1(), b->scratch1());     // ×8
+        b->emit_add(b->scratch1(), b->scratch1(), b->reg_stack());    // + &stack_[0]
+        // Store return value at stack[callee_pos]
+        b->emit_store_int(R0, b->scratch1(), 0);
+        // Return Done (0)
+        b->emit_set_return(0);
+        b->emit_epilogue();
+        break;
+    }
 
     // --- Everything else: bail ---
     default:

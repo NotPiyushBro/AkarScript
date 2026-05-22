@@ -861,19 +861,22 @@ InterpretResult VM::run() {
                     base = args_abs;
                     ip = new_frame->ip;
 
-                    // Call the JIT code
+                    // Call the JIT code with callee_pos and caller_top
                     int jit_pc = 0;
                     JITResult result = jit_code->entry(stack_, args_abs, &jit_pc,
-                                                        func->constants.data());
+                                                        func->constants.data(),
+                                                        callee_abs, stack_top_);
 
                     if (result == JITResult::Bailout) {
                         // JIT bailed — continue interpreting from jit_pc
                         ip = func->bytecode.data() + jit_pc;
-                        // frame, base already set up correctly
                         DISPATCH();
                     }
-                    // JITResult::Done — function completed (shouldn't happen with baseline JIT
-                    // since we bail on RETURN, but handle gracefully)
+                    // JITResult::Done — function completed, return value already stored
+                    // at stack[callee_abs] by the JIT. Pop the frame.
+                    frame_count_--;
+                    stack_top_ = std::max(stack_top_, callee_abs + 1);
+                    REFRESH_FRAME();
                     DISPATCH();
                 }
 

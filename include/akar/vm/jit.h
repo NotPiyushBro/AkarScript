@@ -22,8 +22,11 @@ enum class JITResult : uint8_t {
 };
 
 // JIT'd function signature
-// Args: stack pointer, base register offset, out_pc, constants pointer
-typedef JITResult (*jit_fn_t)(Value* stack, int base, int* out_pc, Value* constants);
+// Args: stack, base, out_pc, constants, callee_pos, caller_top
+// callee_pos: stack index to store return value
+// caller_top: caller's stack_top for restoration after return
+typedef JITResult (*jit_fn_t)(Value* stack, int base, int* out_pc, Value* constants,
+                              int callee_pos, int caller_top);
 
 // Compiled native code for a single function
 struct JITCode {
@@ -68,6 +71,8 @@ public:
     virtual int reg_outpc()  const = 0;
     virtual int reg_base()   const = 0;
     virtual int reg_const()  const = 0;
+    virtual int reg_callee() const = 0;  // callee_pos for RETURN
+    virtual int reg_caller() const = 0;  // caller_top for RETURN
 
     // Scratch registers (caller-saved, freely clobberable)
     virtual int scratch0()   const = 0;
@@ -103,6 +108,9 @@ public:
 
     // --- Move ---
     virtual void emit_mov(int dest, int src) = 0;
+
+    // --- Integer arithmetic ---
+    virtual void emit_add(int dest, int src1, int src2) = 0;
 
     // --- FP Arithmetic ---
     // dest_fp = src1_fp + src2_fp  (and sub, mul, div)

@@ -76,8 +76,8 @@ static inline uint32_t enc_blr(int rn) {
 static constexpr uint32_t ENC_NOP  = 0xD503201Fu;
 static constexpr uint32_t ENC_RET  = 0xD65F03C0u;
 static constexpr uint32_t ENC_MOV_W0_1 = 0x52800020u; // MOV W0, #1
-static constexpr uint32_t ENC_ADD_SP_48 = 0x9100C3FFu; // ADD SP, SP, #48
-static constexpr uint32_t ENC_SUB_SP_48 = 0xD100C3FFu; // SUB SP, SP, #48
+static constexpr uint32_t ENC_ADD_SP_64 = 0x910103FFu; // ADD SP, SP, #64
+static constexpr uint32_t ENC_SUB_SP_64 = 0xD10103FFu; // SUB SP, SP, #64
 
 // ============================================================
 // ARM64Backend
@@ -90,6 +90,8 @@ public:
     static constexpr int R_OUTPC  = 20;  // X20 = out_pc pointer
     static constexpr int R_BASE   = 21;  // X21 = &stack_[base]
     static constexpr int R_CONST  = 22;  // X22 = &constants[0]
+    static constexpr int R_CALLEE = 23;  // X23 = callee_pos (for RETURN)
+    static constexpr int R_CALLER = 24;  // X24 = caller_top (for RETURN)
 
     // Scratch (caller-saved)
     static constexpr int R_SCRATCH0 = 0;  // X0
@@ -114,42 +116,37 @@ public:
     int reg_outpc()  const override { return R_OUTPC; }
     int reg_base()   const override { return R_BASE; }
     int reg_const()  const override { return R_CONST; }
+    int reg_callee() const override { return R_CALLEE; }
+    int reg_caller() const override { return R_CALLER; }
     int scratch0()   const override { return R_SCRATCH0; }
     int scratch1()   const override { return R_SCRATCH1; }
     int fscratch0()  const override { return FR_SCRATCH0; }
     int fscratch1()  const override { return FR_SCRATCH1; }
 
     void emit_prologue() override {
-        // SUB SP, SP, #48
-        emit32(ENC_SUB_SP_48);
-        // STP X29, X30, [SP, #0]
+        // Frame: [SP+0]=X29/X30, [SP+16]=X19/X20, [SP+32]=X21/X22, [SP+48]=X23/X24
+        emit32(ENC_SUB_SP_64);
         emit32(enc_stp(29, 30, 31, 0));
-        // STP X19, X20, [SP, #16]
         emit32(enc_stp(19, 20, 31, 16));
-        // STP X21, X22, [SP, #32]
         emit32(enc_stp(21, 22, 31, 32));
-        // MOV X29, SP
+        emit32(enc_stp(23, 24, 31, 48));
         emit32(enc_mov_reg(29, 31));
 
-        // Set up registers from function arguments:
-        //   X0 = stack, W1 = base, X2 = out_pc, X3 = constants
+        // Args: X0=stack, W1=base, X2=out_pc, X3=constants, W4=callee_pos, W5=caller_top
         emit32(enc_mov_reg(R_STACK, 0));        // X19 = stack
         emit32(enc_mov_reg(R_OUTPC, 2));        // X20 = out_pc
-        // ADD X21, X19, X1, LSL #3  (base_addr = stack + base * 8)
-        emit32(0x8B010E60u | (R_BASE & 0x1Fu));
+        emit32(0x8B010E60u | (R_BASE & 0x1Fu)); // ADD X21, X19, X1, LSL #3
         emit32(enc_mov_reg(R_CONST, 3));        // X22 = constants
+        emit32(enc_mov_reg(R_CALLEE, 4));       // X23 = callee_pos
+        emit32(enc_mov_reg(R_CALLER, 5));       // X24 = caller_top
     }
 
     void emit_epilogue() override {
-        // LDP X21, X22, [SP, #32]
+        emit32(enc_ldp(23, 24, 31, 48));
         emit32(enc_ldp(21, 22, 31, 32));
-        // LDP X19, X20, [SP, #16]
         emit32(enc_ldp(19, 20, 31, 16));
-        // LDP X29, X30, [SP, #0]
         emit32(enc_ldp(29, 30, 31, 0));
-        // ADD SP, SP, #48
-        emit32(ENC_ADD_SP_48);
-        // RET
+        emit32(ENC_ADD_SP_64);
         emit32(ENC_RET);
     }
 
@@ -190,6 +187,10 @@ public:
 
     void emit_mov(int dest, int src) override {
         emit32(enc_mov_reg(dest, src));
+    }
+
+    void emit_add(int dest, int src1, int src2) override {
+        emit32(0x8B000000u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
     }
 
     void emit_fadd(int d, int s1, int s2) override { emit32(enc_fadd(d, s1, s2)); }
