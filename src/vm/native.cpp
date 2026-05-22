@@ -10,6 +10,7 @@
 #include <cstring>
 #include <random>
 #include <limits>
+#include <algorithm>
 
 namespace akar {
 
@@ -126,6 +127,184 @@ void register_builtins(VM& vm) {
     });
 
     // keys(map)
+    // insert(array, index, value) - insert value at index, shifting elements right
+    vm.define_native("insert", [](int argc, Value* argv) -> Value {
+        if (argc < 3 || !argv[0].is_array() || !argv[1].is_number()) return Value();
+        auto& elems = argv[0].as_array()->elements;
+        int idx = safe_int(argv[1].get_number());
+        if (idx < 0) idx = 0;
+        if (idx > static_cast<int>(elems.size())) idx = static_cast<int>(elems.size());
+        elems.insert(elems.begin() + idx, argv[2]);
+        return argv[0];
+    });
+
+    // remove(array, index) - remove and return element at index
+    vm.define_native("remove", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_number()) return Value();
+        auto& elems = argv[0].as_array()->elements;
+        int idx = safe_int(argv[1].get_number());
+        if (idx < 0 || idx >= static_cast<int>(elems.size())) return Value();
+        Value val = elems[idx];
+        elems.erase(elems.begin() + idx);
+        return val;
+    });
+
+    // shift(array) - remove and return the first element
+    vm.define_native("shift", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        auto& elems = argv[0].as_array()->elements;
+        if (elems.empty()) return Value();
+        Value val = elems.front();
+        elems.erase(elems.begin());
+        return val;
+    });
+
+    // unshift(array, value) - insert value at the beginning
+    vm.define_native("unshift", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array()) return Value();
+        argv[0].as_array()->elements.insert(argv[0].as_array()->elements.begin(), argv[1]);
+        return argv[0];
+    });
+
+    // index_of(array, value) - find index of value in array, -1 if not found
+    vm.define_native("index_of", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array()) return Value(-1.0);
+        auto& elems = argv[0].as_array()->elements;
+        for (size_t i = 0; i < elems.size(); i++) {
+            if (elems[i] == argv[1]) return Value(static_cast<double>(i));
+        }
+        return Value(-1.0);
+    });
+
+    // slice(array, start, end) - return a new sub-array [start, end)
+    vm.define_native("slice", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || !argv[1].is_number()) return Value();
+        auto& elems = argv[0].as_array()->elements;
+        int start = safe_int(argv[1].get_number());
+        int end = static_cast<int>(elems.size());
+        if (argc >= 3 && argv[2].is_number()) end = safe_int(argv[2].get_number());
+        if (start < 0) start = 0;
+        if (end > static_cast<int>(elems.size())) end = static_cast<int>(elems.size());
+        if (start > end) start = end;
+        auto* result = allocate_array();
+        for (int i = start; i < end; i++) {
+            result->elements.push_back(elems[i]);
+        }
+        return Value(static_cast<Obj*>(result));
+    });
+
+    // reverse(array) - reverse array in place, return array
+    vm.define_native("reverse", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        auto& elems = argv[0].as_array()->elements;
+        std::reverse(elems.begin(), elems.end());
+        return argv[0];
+    });
+
+    // sort(array) - sort array in place (ascending), return array
+    vm.define_native("sort", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        auto& elems = argv[0].as_array()->elements;
+        std::sort(elems.begin(), elems.end(), [](const Value& a, const Value& b) {
+            if (a.is_number() && b.is_number()) return a.get_number() < b.get_number();
+            if (a.is_string() && b.is_string()) return a.as_string()->value < b.as_string()->value;
+            return false;
+        });
+        return argv[0];
+    });
+
+    // fill(value, count) - create array of count copies of value
+    vm.define_native("fill", [](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[1].is_number()) return Value();
+        int count = safe_int(argv[1].get_number());
+        if (count < 0) count = 0;
+        auto* arr = allocate_array();
+        arr->elements.resize(count, argv[0]);
+        return Value(static_cast<Obj*>(arr));
+    });
+
+    // clear(array) - remove all elements, return array
+    vm.define_native("clear", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        argv[0].as_array()->elements.clear();
+        return argv[0];
+    });
+
+    // flatten(array) - flatten one level of nesting, return new array
+    vm.define_native("flatten", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        auto* result = allocate_array();
+        for (auto& elem : argv[0].as_array()->elements) {
+            if (elem.is_array()) {
+                for (auto& inner : elem.as_array()->elements) {
+                    result->elements.push_back(inner);
+                }
+            } else {
+                result->elements.push_back(elem);
+            }
+        }
+        return Value(static_cast<Obj*>(result));
+    });
+
+    // unique(array) - return new array with duplicates removed (preserves first occurrence order)
+    vm.define_native("unique", [](int argc, Value* argv) -> Value {
+        if (argc < 1 || !argv[0].is_array()) return Value();
+        auto* result = allocate_array();
+        for (auto& elem : argv[0].as_array()->elements) {
+            bool found = false;
+            for (auto& existing : result->elements) {
+                if (existing == elem) { found = true; break; }
+            }
+            if (!found) result->elements.push_back(elem);
+        }
+        return Value(static_cast<Obj*>(result));
+    });
+
+    // concat_arrays(arr1, arr2, ...) - concatenate arrays into a new array
+    vm.define_native("concat_arrays", [](int argc, Value* argv) -> Value {
+        auto* result = allocate_array();
+        for (int i = 0; i < argc; i++) {
+            if (argv[i].is_array()) {
+                for (auto& elem : argv[i].as_array()->elements) {
+                    result->elements.push_back(elem);
+                }
+            }
+        }
+        return Value(static_cast<Obj*>(result));
+    });
+
+    // every(array, fn) - return true if fn(elem) is truthy for all elements
+    vm.define_native("every", [&vm](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || (!argv[1].is_closure() && !argv[1].is_native())) return Value(false);
+        auto& elems = argv[0].as_array()->elements;
+        for (auto& elem : elems) {
+            Value result;
+            if (argv[1].is_native()) {
+                result = argv[1].as_native()->function(1, &elem);
+            } else {
+                result = vm.call_function(argv[1].as_closure(), {elem});
+            }
+            if (!result.is_truthy()) return Value(false);
+        }
+        return Value(true);
+    });
+
+    // some(array, fn) - return true if fn(elem) is truthy for any element
+    vm.define_native("some", [&vm](int argc, Value* argv) -> Value {
+        if (argc < 2 || !argv[0].is_array() || (!argv[1].is_closure() && !argv[1].is_native())) return Value(false);
+        auto& elems = argv[0].as_array()->elements;
+        for (auto& elem : elems) {
+            Value result;
+            if (argv[1].is_native()) {
+                result = argv[1].as_native()->function(1, &elem);
+            } else {
+                result = vm.call_function(argv[1].as_closure(), {elem});
+            }
+            if (result.is_truthy()) return Value(true);
+        }
+        return Value(false);
+    });
+
     vm.define_native("keys", [](int argc, Value* argv) -> Value {
         if (argc != 1 || !argv[0].is_map()) return Value();
         auto* arr = allocate_array();

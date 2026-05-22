@@ -233,7 +233,7 @@ struct JITCache {
     std::unordered_map<ObjFunction*, JITCode*> compiled;
     std::unordered_map<ObjFunction*, int> call_counts;
     JITCompiler compiler;
-    static constexpr int JIT_THRESHOLD = 100;
+    static constexpr int JIT_THRESHOLD = 999999; // DISABLED for now
 
     JITCode* get_or_compile(ObjFunction* func);
     void record_call(ObjFunction* func);

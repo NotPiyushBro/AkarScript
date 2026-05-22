@@ -328,6 +328,8 @@ InterpretResult VM::run() {
         // Enum
         &&op_ENUM_CREATE, &&op_ENUM_VARIANT, &&op_ENUM_DATA_VARIANT,
         &&op_ENUM_GET, &&op_ENUM_IS,
+        // Bitwise
+        &&op_BIT_AND, &&op_BIT_OR, &&op_BIT_XOR, &&op_BIT_NOT, &&op_SHL, &&op_SHR,
     };
 
     #define DISPATCH() do { \
@@ -760,6 +762,54 @@ InterpretResult VM::run() {
         uint8_t b = ip[2];
         ip += 4;
         S(a) = Value(!S(b).is_truthy());
+        DISPATCH();
+    }
+    CASE(BIT_AND): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) & static_cast<int64_t>(rc.get_number())));
+        } else { runtime_error("Operands must be numbers (bitwise AND)"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(BIT_OR): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) | static_cast<int64_t>(rc.get_number())));
+        } else { runtime_error("Operands must be numbers (bitwise OR)"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(BIT_XOR): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) ^ static_cast<int64_t>(rc.get_number())));
+        } else { runtime_error("Operands must be numbers (bitwise XOR)"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(BIT_NOT): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4;
+        Value& rb = S(b);
+        if (rb.is_number()) {
+            S(a) = Value(static_cast<double>(~static_cast<int64_t>(rb.get_number())));
+        } else { runtime_error("Operand must be a number (bitwise NOT)"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(SHL): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) << static_cast<int64_t>(rc.get_number())));
+        } else { runtime_error("Operands must be numbers (shift left)"); RETURN_RUNTIME_ERROR; }
+        DISPATCH();
+    }
+    CASE(SHR): {
+        uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+        Value& rb = S(b); Value& rc = S(c);
+        if (rb.is_number() && rc.is_number()) {
+            S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) >> static_cast<int64_t>(rc.get_number())));
+        } else { runtime_error("Operands must be numbers (shift right)"); RETURN_RUNTIME_ERROR; }
         DISPATCH();
     }
     CASE(JMP): {

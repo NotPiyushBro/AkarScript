@@ -370,11 +370,44 @@ ASTPtr Parser::or_expr() {
 }
 
 ASTPtr Parser::and_expr() {
-    auto expr = equality();
+    auto expr = bitwise_or();
     while (match(TokenType::And)) {
         int line = previous().line;
-        auto right = equality();
+        auto right = bitwise_or();
         expr = std::make_shared<LogicalExpr>(expr, "and", right, line);
+    }
+    return expr;
+}
+
+ASTPtr Parser::bitwise_or() {
+    auto expr = bitwise_xor();
+    while (match(TokenType::Pipe)) {
+        auto op = previous().lexeme;
+        int line = previous().line;
+        auto right = bitwise_xor();
+        expr = std::make_shared<BinaryExpr>(expr, op, right, line);
+    }
+    return expr;
+}
+
+ASTPtr Parser::bitwise_xor() {
+    auto expr = bitwise_and();
+    while (match(TokenType::Caret)) {
+        auto op = previous().lexeme;
+        int line = previous().line;
+        auto right = bitwise_and();
+        expr = std::make_shared<BinaryExpr>(expr, op, right, line);
+    }
+    return expr;
+}
+
+ASTPtr Parser::bitwise_and() {
+    auto expr = equality();
+    while (match(TokenType::Amp)) {
+        auto op = previous().lexeme;
+        int line = previous().line;
+        auto right = equality();
+        expr = std::make_shared<BinaryExpr>(expr, op, right, line);
     }
     return expr;
 }
@@ -391,8 +424,19 @@ ASTPtr Parser::equality() {
 }
 
 ASTPtr Parser::comparison() {
-    auto expr = range();
+    auto expr = shift();
     while (match_any({TokenType::Less, TokenType::LessEqual, TokenType::Greater, TokenType::GreaterEqual})) {
+        auto op = previous().lexeme;
+        int line = previous().line;
+        auto right = shift();
+        expr = std::make_shared<BinaryExpr>(expr, op, right, line);
+    }
+    return expr;
+}
+
+ASTPtr Parser::shift() {
+    auto expr = range();
+    while (match_any({TokenType::LessLess, TokenType::GreaterGreater})) {
         auto op = previous().lexeme;
         int line = previous().line;
         auto right = range();
@@ -435,7 +479,7 @@ ASTPtr Parser::multiplication() {
 }
 
 ASTPtr Parser::unary() {
-    if (match_any({TokenType::Minus, TokenType::Bang, TokenType::Not})) {
+    if (match_any({TokenType::Minus, TokenType::Bang, TokenType::Not, TokenType::Tilde})) {
         auto op = previous().lexeme;
         int line = previous().line;
         auto operand = unary();

@@ -40,8 +40,12 @@ private:
     ASTPtr assignment();
     ASTPtr or_expr();
     ASTPtr and_expr();
+    ASTPtr bitwise_or();
+    ASTPtr bitwise_xor();
+    ASTPtr bitwise_and();
     ASTPtr equality();
     ASTPtr comparison();
+    ASTPtr shift();
     ASTPtr range();
     ASTPtr addition();
     ASTPtr multiplication();

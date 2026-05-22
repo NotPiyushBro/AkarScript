@@ -57,6 +57,10 @@ const char* token_type_name(TokenType type) {
         case TokenType::AmpAmp: return "&&";
         case TokenType::Pipe: return "|";
         case TokenType::PipePipe: return "||";
+        case TokenType::Caret: return "^";
+        case TokenType::Tilde: return "~";
+        case TokenType::LessLess: return "<<";
+        case TokenType::GreaterGreater: return ">>";
         case TokenType::Dot: return ".";
         case TokenType::DotDot: return "..";
         case TokenType::DotDotDot: return "...";
@@ -133,10 +137,18 @@ Token Lexer::next_token() {
             return make_token(TokenType::Slash);
         case '=': return match('=') ? make_token(TokenType::EqualEqual) : make_token(TokenType::Equal);
         case '!': return match('=') ? make_token(TokenType::BangEqual) : make_token(TokenType::Bang);
-        case '<': return match('=') ? make_token(TokenType::LessEqual) : make_token(TokenType::Less);
-        case '>': return match('=') ? make_token(TokenType::GreaterEqual) : make_token(TokenType::Greater);
+        case '<':
+            if (match('=')) return make_token(TokenType::LessEqual);
+            if (match('<')) return make_token(TokenType::LessLess);
+            return make_token(TokenType::Less);
+        case '>':
+            if (match('=')) return make_token(TokenType::GreaterEqual);
+            if (match('>')) return make_token(TokenType::GreaterGreater);
+            return make_token(TokenType::Greater);
         case '&': return match('&') ? make_token(TokenType::AmpAmp) : make_token(TokenType::Amp);
         case '|': return match('|') ? make_token(TokenType::PipePipe) : make_token(TokenType::Pipe);
+        case '^': return make_token(TokenType::Caret);
+        case '~': return make_token(TokenType::Tilde);
         default:
             return error_token("Unexpected character");
     }

@@ -19,6 +19,7 @@ enum class TokenType {
     Equal, EqualEqual, Bang, BangEqual,
     Less, LessEqual, Greater, GreaterEqual,
     Amp, AmpAmp, Pipe, PipePipe,
+    Caret, Tilde, LessLess, GreaterGreater,
     Dot, DotDot, DotDotDot, // range, varargs
 
     // Delimiters

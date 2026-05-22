@@ -143,6 +143,14 @@ enum class Opcode : uint8_t {
     ENUM_DATA_VARIANT, // set_data_variant(A, B) — register data variant: class R[A], name const_B (creates factory method)
     ENUM_GET,       // A = R[B].variant_C — get enum variant (constant index C)
     ENUM_IS,        // A = is_enum_type(R[B], name_const_C) — check if R[B] belongs to enum with name const_C
+
+    // Bitwise (appended to avoid shifting existing opcodes)
+    BIT_AND,        // A = R[B] & R[C] (integer)
+    BIT_OR,         // A = R[B] | R[C] (integer)
+    BIT_XOR,        // A = R[B] ^ R[C] (integer)
+    BIT_NOT,        // A = ~R[B] (integer)
+    SHL,            // A = R[B] << R[C] (integer)
+    SHR,            // A = R[B] >> R[C] (integer)
 };
 
 inline uint8_t op_byte(Opcode op) { return static_cast<uint8_t>(op); }

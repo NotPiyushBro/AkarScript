@@ -431,6 +431,11 @@ void CodeGenerator::compile_binary(BinaryExpr* node, int reg) {
     else if (node->op == "<=") op = Opcode::LTE;
     else if (node->op == ">") op = Opcode::GT;
     else if (node->op == ">=") op = Opcode::GTE;
+    else if (node->op == "&") op = Opcode::BIT_AND;
+    else if (node->op == "|") op = Opcode::BIT_OR;
+    else if (node->op == "^") op = Opcode::BIT_XOR;
+    else if (node->op == "<<") op = Opcode::SHL;
+    else if (node->op == ">>") op = Opcode::SHR;
     else throw std::runtime_error("Unknown binary operator: " + node->op);
 
     // Compile-time type specialization: emit type-specific opcodes when types are known
@@ -491,6 +496,9 @@ void CodeGenerator::compile_unary(UnaryExpr* node, int reg) {
     } else if (node->op == "!" || node->op == "not") {
         set_reg_type(reg, RegType::Bool);
         emit(op_byte(Opcode::NOT), reg, operand, 0);
+    } else if (node->op == "~") {
+        set_reg_type(reg, RegType::Number);
+        emit(op_byte(Opcode::BIT_NOT), reg, operand, 0);
     }
     free_register(); // operand
 }
@@ -665,6 +673,11 @@ void CodeGenerator::compile_assignment(AssignmentExpr* node, int reg) {
                 else if (bin->op == "*") op = Opcode::MUL;
                 else if (bin->op == "/") op = Opcode::DIV;
                 else if (bin->op == "%") op = Opcode::MOD;
+                else if (bin->op == "&") op = Opcode::BIT_AND;
+                else if (bin->op == "|") op = Opcode::BIT_OR;
+                else if (bin->op == "^") op = Opcode::BIT_XOR;
+                else if (bin->op == "<<") op = Opcode::SHL;
+                else if (bin->op == ">>") op = Opcode::SHR;
                 else goto fallback;
 
                 // Type-specialize the in-place op if types are known
@@ -1616,6 +1629,8 @@ static int opcode_dest_reg(uint8_t op) {
         case Opcode::EQ_NUM: case Opcode::NEQ_NUM: case Opcode::LT_NUM:
         case Opcode::LTE_NUM: case Opcode::GT_NUM: case Opcode::GTE_NUM:
         case Opcode::MOD_EQ_ZERO:
+        case Opcode::BIT_AND: case Opcode::BIT_OR: case Opcode::BIT_XOR:
+        case Opcode::BIT_NOT: case Opcode::SHL: case Opcode::SHR:
         case Opcode::SIGNAL_CREATE: case Opcode::SIGNAL_GET:
         case Opcode::EFFECT_CREATE:
         case Opcode::ENUM_CREATE: case Opcode::ENUM_GET: case Opcode::ENUM_IS:
@@ -1636,6 +1651,7 @@ static int opcode_src_regs(uint8_t op) {
         case Opcode::ITER_INIT: case Opcode::ITER_DONE:
         case Opcode::GET_UPVALUE: case Opcode::EFFECT_CREATE:
         case Opcode::NEW_INSTANCE: case Opcode::ADD_IMM:
+        case Opcode::BIT_NOT:
             return 2; // reads B only
         case Opcode::SET_LOCAL: case Opcode::SET_UPVALUE: case Opcode::SET_GLOBAL:
         case Opcode::PRINT: case Opcode::RETURN:
@@ -1656,6 +1672,8 @@ static int opcode_src_regs(uint8_t op) {
         case Opcode::EQ_NUM: case Opcode::NEQ_NUM: case Opcode::LT_NUM:
         case Opcode::LTE_NUM: case Opcode::GT_NUM: case Opcode::GTE_NUM:
         case Opcode::MOD_EQ_ZERO:
+        case Opcode::BIT_AND: case Opcode::BIT_OR: case Opcode::BIT_XOR:
+        case Opcode::SHL: case Opcode::SHR:
         case Opcode::GET_FIELD: case Opcode::GET_INDEX: case Opcode::GET_METHOD:
         case Opcode::FIBER_RESUME: case Opcode::ENUM_IS:
             return 6; // reads B and C
