@@ -861,6 +861,9 @@ InterpretResult VM::run() {
                     base = args_abs;
                     ip = new_frame->ip;
 
+                    // Set VM pointer for JIT call helpers
+                    jit_set_vm(this);
+
                     // Call the JIT code with callee_pos and caller_top
                     int jit_pc = 0;
                     JITResult result = jit_code->entry(stack_, args_abs, &jit_pc,

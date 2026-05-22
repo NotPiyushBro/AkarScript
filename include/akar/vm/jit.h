@@ -180,6 +180,9 @@ inline JITPlatform detect_jit_platform() {
 // Returns nullptr if the platform is not supported.
 std::unique_ptr<JITBackend> create_jit_backend();
 
+// Set the VM pointer for JIT call helpers (must be called before JIT execution)
+void jit_set_vm(VM* vm);
+
 // ============================================================
 // JIT Compiler — platform-independent compilation logic
 // ============================================================

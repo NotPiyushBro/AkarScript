@@ -26,6 +26,31 @@ JITCode::~JITCode() {
 // Helper functions called from JIT code
 // ============================================================
 
+// NaN-boxed bit patterns
+static constexpr int64_t NIL_BITS   = 0x7FFC000000000000LL;
+static constexpr int64_t FALSE_BITS = 0x7FF8000000000001LL;
+static constexpr int64_t TRUE_BITS  = 0x7FF8000000000002LL;
+static constexpr uint64_t NAN_BASE  = 0x7FF8000000000000ULL;
+
+// VM pointer set before JIT execution (used by call helpers)
+static VM* g_jit_vm = nullptr;
+
+void jit_set_vm(VM* vm) { g_jit_vm = vm; }
+
+// Helper: perform a function call from JIT code through the VM
+static int64_t jit_call_helper(Value* callee_slot, int arg_count) {
+    Value callee = *callee_slot;
+    if (!callee.is_closure()) return NIL_BITS;
+    if (!g_jit_vm) return NIL_BITS;
+    ObjClosure* closure = callee.as_closure();
+    std::vector<Value> args(callee_slot + 1, callee_slot + 1 + arg_count);
+    Value result = g_jit_vm->call_function(closure, args);
+    *callee_slot = result;
+    uint64_t bits;
+    std::memcpy(&bits, &result, 8);
+    return static_cast<int64_t>(bits);
+}
+
 static int64_t jit_fmod(double a, double b) {
     double r = std::fmod(a, b);
     uint64_t bits;
@@ -35,27 +60,18 @@ static int64_t jit_fmod(double a, double b) {
 
 static int64_t jit_mod_eq_zero(double a, double b) {
     return std::fmod(a, b) == 0.0
-        ? static_cast<int64_t>(0x7FF8000000000002LL)  // TRUE_BITS
-        : static_cast<int64_t>(0x7FF8000000000001LL);  // FALSE_BITS
+        ? static_cast<int64_t>(TRUE_BITS)
+        : static_cast<int64_t>(FALSE_BITS);
 }
-
-// NaN-boxed bit patterns
-static constexpr int64_t NIL_BITS   = 0x7FFC000000000000LL;
-static constexpr int64_t FALSE_BITS = 0x7FF8000000000001LL;
-static constexpr int64_t TRUE_BITS  = 0x7FF8000000000002LL;
-static constexpr uint64_t NAN_BASE  = 0x7FF8000000000000ULL;
 
 // Helper: returns TRUE_BITS if value is truthy, FALSE_BITS otherwise
 static int64_t jit_is_truthy(int64_t bits) {
     uint64_t b = static_cast<uint64_t>(bits);
     if (b == FALSE_BITS || b == NIL_BITS) return FALSE_BITS;
     if (b == TRUE_BITS) return TRUE_BITS;
-    // For objects: non-nil objects are truthy
-    // NaN-boxed objects have (bits & NAN_BASE) == NAN_BASE and bit 51 set
     if ((b & NAN_BASE) == NAN_BASE && (b & 0x0008000000000000ULL)) return TRUE_BITS;
-    // Numbers: 0 is truthy in Akar (not like C)
-    if ((b & NAN_BASE) != NAN_BASE) return TRUE_BITS; // it's a number
-    return FALSE_BITS; // NaN (canonical) — shouldn't happen
+    if ((b & NAN_BASE) != NAN_BASE) return TRUE_BITS;
+    return FALSE_BITS;
 }
 
 // ============================================================
@@ -350,6 +366,23 @@ bool JITCompiler::compile_instruction(int& pc) {
     case Opcode::JMP_IF_NOT_EQ:  EMIT_FUSED_CMP_BRANCH(cond_ne); break;
 
     #undef EMIT_FUSED_CMP_BRANCH
+
+    // --- Call: invoke function through VM helper ---
+    case Opcode::CALL: {
+        // CALL R_a, arg_count=R_b8
+        int offset_a = a * 8;  // byte offset from R_BASE for stack[base + a]
+        // Compute callee_slot = &stack[base + a] = R_BASE + a*8
+        b->emit_load_imm64(R1, static_cast<uint64_t>(offset_a));
+        b->emit_add(R1, R1, b->reg_base());  // R1 = callee_slot
+        // ARM64 calling convention: X0 = callee_slot, X1 = arg_count
+        b->emit_mov(0, R1);                   // X0 = callee_slot
+        b->emit_load_imm64(1, static_cast<uint64_t>(b8)); // X1 = arg_count
+        // Call the helper (returns NaN-boxed result in X0)
+        b->emit_call_indirect(reinterpret_cast<void*>(&jit_call_helper));
+        // Store result at stack[base + a]
+        b->emit_store_int(0, b->reg_base(), offset_a);
+        break;
+    }
 
     // --- Return: store result at stack[callee_pos], return Done ---
     case Opcode::RETURN: {
