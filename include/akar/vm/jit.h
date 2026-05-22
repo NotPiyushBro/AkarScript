@@ -22,11 +22,9 @@ enum class JITResult : uint8_t {
 };
 
 // JIT'd function signature
-// Args: stack, base, out_pc, constants, callee_pos, caller_top
-// callee_pos: stack index to store return value
-// caller_top: caller's stack_top for restoration after return
+// Args: stack, base, out_pc, constants, callee_pos, caller_top, closure
 typedef JITResult (*jit_fn_t)(Value* stack, int base, int* out_pc, Value* constants,
-                              int callee_pos, int caller_top);
+                              int callee_pos, int caller_top, ObjClosure* closure);
 
 // Compiled native code for a single function
 struct JITCode {
@@ -40,39 +38,23 @@ struct JITCode {
 // ============================================================
 // Abstract JIT Backend — platform-specific instruction encoding
 // ============================================================
-//
-// Each backend (ARM64, x86-64, RISC-V, etc.) implements this interface.
-// The JITCompiler uses only these methods — no platform-specific code
-// in the compiler logic.
-//
-// Register model:
-//   The backend allocates physical registers for these abstract roles:
-//     REG_STACK  — pointer to VM stack base (&stack_[0])
-//     REG_OUTPC  — pointer to int* for bail-out PC output
-//     REG_BASE   — pointer to current function's registers (&stack_[base])
-//     REG_CONST  — pointer to function's constant pool
-//   Plus 2 scratch integer regs and 2 scratch FP regs.
-//
-// All offsets are in bytes. Stack slots are 8 bytes (sizeof(Value)).
 
 class JITBackend {
 public:
     virtual ~JITBackend() = default;
 
     // --- Code buffer ---
-
     virtual void   reset() = 0;
     virtual size_t code_size() const = 0;
 
     // --- Register accessors ---
-    // Return physical register IDs for abstract roles.
-    // These are callee-saved (preserved across C calls).
     virtual int reg_stack()  const = 0;
     virtual int reg_outpc()  const = 0;
     virtual int reg_base()   const = 0;
     virtual int reg_const()  const = 0;
-    virtual int reg_callee() const = 0;  // callee_pos for RETURN
-    virtual int reg_caller() const = 0;  // caller_top for RETURN
+    virtual int reg_callee() const = 0;
+    virtual int reg_caller() const = 0;
+    virtual int reg_closure() const = 0;
 
     // Scratch registers (caller-saved, freely clobberable)
     virtual int scratch0()   const = 0;
@@ -84,26 +66,15 @@ public:
     virtual int slot_size()  const { return 8; }
 
     // --- Prologue / Epilogue ---
-    // prologue: save callee-saved regs, set up REG_STACK/REG_OUTPC/REG_BASE/REG_CONST
-    //   Args: X0=stack, W1=base, X2=out_pc, X3=constants  (AAPCS64 convention)
     virtual void emit_prologue() = 0;
-
-    // epilogue: restore callee-saved regs, return W0 (JITResult)
     virtual void emit_epilogue() = 0;
-
-    // Set return value (0=Done, 1=Bailout) before epilogue
     virtual void emit_set_return(int value) = 0;
 
     // --- Load / Store ---
-    // dest = *(int64_t*)(base + offset)
     virtual void emit_load_int(int dest, int base, int offset) = 0;
-    // *(int64_t*)(base + offset) = src
     virtual void emit_store_int(int src, int base, int offset) = 0;
-    // dest_fp = *(double*)(base + offset)
     virtual void emit_load_fp(int dest_fp, int base, int offset) = 0;
-    // *(double*)(base + offset) = src_fp
     virtual void emit_store_fp(int src_fp, int base, int offset) = 0;
-    // dest = imm64
     virtual void emit_load_imm64(int dest, uint64_t imm) = 0;
 
     // --- Move ---
@@ -111,24 +82,35 @@ public:
 
     // --- Integer arithmetic ---
     virtual void emit_add(int dest, int src1, int src2) = 0;
+    virtual void emit_sub(int dest, int src1, int src2) = 0;
+    virtual void emit_and(int dest, int src1, int src2) = 0;
+    virtual void emit_orr(int dest, int src1, int src2) = 0;
+    virtual void emit_eor(int dest, int src1, int src2) = 0;
+    virtual void emit_lsl(int dest, int src, int shift) = 0;
+    virtual void emit_lsr(int dest, int src, int shift) = 0;
+    virtual void emit_mvn(int dest, int src) = 0;
+    virtual void emit_sxtw(int dest, int src) = 0;
 
     // --- FP Arithmetic ---
-    // dest_fp = src1_fp + src2_fp  (and sub, mul, div)
     virtual void emit_fadd(int dest, int src1, int src2) = 0;
     virtual void emit_fsub(int dest, int src1, int src2) = 0;
     virtual void emit_fmul(int dest, int src1, int src2) = 0;
     virtual void emit_fdiv(int dest, int src1, int src2) = 0;
-    // dest_fp = -src_fp
     virtual void emit_fneg(int dest, int src) = 0;
-    // compare src1_fp vs src2_fp (sets CPU flags)
     virtual void emit_fcmp(int src1, int src2) = 0;
-    // dest_fp = *(double*)&src_int  (bitwise reinterpret)
     virtual void emit_fmov_from_int(int dest_fp, int src_int) = 0;
+    virtual void emit_fmov_to_int(int dest_int, int src_fp) = 0;
+    // Truncate FP toward zero (FRINTZ): dest_fp = trunc(src_fp)
+    virtual void emit_frintz(int dest_fp, int src_fp) = 0;
 
     // --- Integer comparison ---
     virtual void emit_cmp(int src1, int src2) = 0;
+    // Compare register with 12-bit immediate (sets flags)
+    virtual void emit_cmp_imm(int src, uint64_t imm) = 0;
+    // Logical shift right by immediate
+    virtual void emit_lsr_imm(int dest, int src, int shift) = 0;
 
-    // --- Condition codes (return platform-specific values) ---
+    // --- Condition codes ---
     virtual int cond_eq() const = 0;
     virtual int cond_ne() const = 0;
     virtual int cond_lt() const = 0;
@@ -137,22 +119,16 @@ public:
     virtual int cond_ge() const = 0;
 
     // --- Branches ---
-    // Unconditional branch. Returns code position for later patching.
     virtual size_t emit_branch(int32_t offset = 0) = 0;
-    // Conditional branch (uses last cmp/fcmp result). Returns position for patching.
     virtual size_t emit_branch_cond(int cond, int32_t offset = 0) = 0;
 
     // --- Function call ---
-    // Load a 64-bit address into a scratch register and call it indirectly.
-    // Clobbers scratch registers. C calling convention (args in D0/D1 or X0/X1).
     virtual void emit_call_indirect(void* func_addr) = 0;
 
     // --- Patching ---
-    // Patch a branch at code_pos to jump to target_code_pos.
     virtual void patch_branch(size_t code_pos, size_t target_code_pos) = 0;
 
     // --- Finalize ---
-    // Allocate executable memory, copy code, clear icache. Returns nullptr on failure.
     virtual JITCode* finalize() = 0;
 };
 
@@ -176,8 +152,6 @@ inline JITPlatform detect_jit_platform() {
 #endif
 }
 
-// Create the appropriate backend for the current platform.
-// Returns nullptr if the platform is not supported.
 std::unique_ptr<JITBackend> create_jit_backend();
 
 // Set the VM pointer for JIT call helpers (must be called before JIT execution)
@@ -218,8 +192,21 @@ private:
     // Generate code for a single bytecode instruction
     bool compile_instruction(int& pc);
 
+    // FP store cache: tracks last FP store to avoid redundant load after store
+    struct FPStoreCache {
+        bool valid = false;
+        int slot_byte_offset = -1;  // byte offset into stack (slot_offset(reg))
+        int fp_reg = -1;            // which FP register holds the value
+    } fp_cache_;
+
+    // Invalidate FP cache (call on jumps, helper calls, etc.)
+    void invalidate_fp_cache() { fp_cache_.valid = false; }
+
     // Emit a bailout: save PC and return to interpreter
     void emit_bailout(int pc);
+
+    // Emit a helper call: load address into scratch, BLR, result in X0
+    void emit_helper_call(void* func_addr);
 
     // Fix up all pending jumps
     void fixup_jumps();
@@ -233,7 +220,7 @@ struct JITCache {
     std::unordered_map<ObjFunction*, JITCode*> compiled;
     std::unordered_map<ObjFunction*, int> call_counts;
     JITCompiler compiler;
-    static constexpr int JIT_THRESHOLD = 999999; // DISABLED for now
+    static constexpr int JIT_THRESHOLD = 50; // compile after 50 calls
 
     JITCode* get_or_compile(ObjFunction* func);
     void record_call(ObjFunction* func);

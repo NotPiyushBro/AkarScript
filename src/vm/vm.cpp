@@ -881,16 +881,13 @@ InterpretResult VM::run() {
             // JIT: track calls and attempt compilation for hot functions
             if (jit_enabled_ && !closure->function->has_varargs && arg_count == fixed_arity) {
                 ObjFunction* func = closure->function;
-                jit_cache_.record_call(func);
 
-                // Check if we already have JIT code
-                auto jit_it = jit_cache_.compiled.find(func);
-                if (jit_it != jit_cache_.compiled.end()) {
-                    // Execute JIT'd native code
-                    JITCode* jit_code = jit_it->second;
+                // Fast path: already JIT-compiled? Use direct pointer (no hash map)
+                jit_fast_path:
+                if (func->jit_code) {
+                    JITCode* jit_code = func->jit_code;
                     int args_abs = callee_abs + 1;
 
-                    // Set up the call frame (interpreter needs it for RETURN handling)
                     frame->ip = ip;
                     CallFrame* new_frame = &frames_[frame_count_++];
                     new_frame->closure = closure;
@@ -911,34 +908,32 @@ InterpretResult VM::run() {
                     base = args_abs;
                     ip = new_frame->ip;
 
-                    // Set VM pointer for JIT call helpers
                     jit_set_vm(this);
 
-                    // Call the JIT code with callee_pos and caller_top
                     int jit_pc = 0;
                     JITResult result = jit_code->entry(stack_, args_abs, &jit_pc,
                                                         func->constants.data(),
-                                                        callee_abs, stack_top_);
+                                                        callee_abs, stack_top_, closure);
 
                     if (result == JITResult::Bailout) {
-                        // JIT bailed — continue interpreting from jit_pc
                         ip = func->bytecode.data() + jit_pc;
                         DISPATCH();
                     }
-                    // JITResult::Done — function completed, return value already stored
-                    // at stack[callee_abs] by the JIT. Pop the frame.
                     frame_count_--;
                     stack_top_ = std::max(stack_top_, callee_abs + 1);
                     REFRESH_FRAME();
                     DISPATCH();
                 }
 
-                // Check if it's time to JIT compile
-                if (jit_cache_.call_counts[func] >= JITCache::JIT_THRESHOLD) {
+                // Not yet JIT-compiled: count calls and compile when hot
+                func->jit_call_count++;
+                if (func->jit_call_count >= JITCache::JIT_THRESHOLD) {
                     JITCode* jit_code = jit_cache_.compiler.compile(func);
                     if (jit_code) {
                         jit_cache_.compiled[func] = jit_code;
-                        // The JIT will be used on the NEXT call to this function
+                        func->jit_code = jit_code;
+                        // Immediately use the JIT code (don't wait for next call)
+                        goto jit_fast_path;
                     }
                 }
             }
@@ -2540,6 +2535,90 @@ InterpretResult VM::run() {
             case Opcode::ADD_IMM:
                 S(wa) = Value(S(wb).get_number() + static_cast<double>(wc));
                 break;
+            // Quickened numeric opcodes (same as base but type-specialized)
+            case Opcode::ADD_NUM:
+                S(wa) = Value(S(wb).get_number() + S(wc).get_number());
+                break;
+            case Opcode::ADD_STR: {
+                auto* result = get_string_table().intern(
+                    S(wb).as_string()->value + S(wc).as_string()->value);
+                S(wa) = Value(static_cast<Obj*>(result));
+                break;
+            }
+            case Opcode::SUB_NUM:
+                S(wa) = Value(S(wb).get_number() - S(wc).get_number());
+                break;
+            case Opcode::MUL_NUM:
+                S(wa) = Value(S(wb).get_number() * S(wc).get_number());
+                break;
+            case Opcode::DIV_NUM: {
+                double rhs = S(wc).get_number();
+                if (rhs == 0) { runtime_error("Division by zero"); RETURN_RUNTIME_ERROR; }
+                S(wa) = Value(S(wb).get_number() / rhs);
+                break;
+            }
+            case Opcode::MOD_NUM: {
+                double rhs = S(wc).get_number();
+                if (rhs == 0) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; }
+                S(wa) = Value(fmod(S(wb).get_number(), rhs));
+                break;
+            }
+            case Opcode::EQ_NUM:
+                S(wa) = Value(S(wb).get_number() == S(wc).get_number());
+                break;
+            case Opcode::NEQ_NUM:
+                S(wa) = Value(S(wb).get_number() != S(wc).get_number());
+                break;
+            case Opcode::LT_NUM:
+                S(wa) = Value(S(wb).get_number() < S(wc).get_number());
+                break;
+            case Opcode::LTE_NUM:
+                S(wa) = Value(S(wb).get_number() <= S(wc).get_number());
+                break;
+            case Opcode::GT_NUM:
+                S(wa) = Value(S(wb).get_number() > S(wc).get_number());
+                break;
+            case Opcode::GTE_NUM:
+                S(wa) = Value(S(wb).get_number() >= S(wc).get_number());
+                break;
+            case Opcode::MOD_EQ_ZERO: {
+                double a_val = S(wb).get_number();
+                double b_val = S(wc).get_number();
+                if (b_val == 0) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; }
+                S(wa) = Value(fmod(a_val, b_val) == 0.0);
+                break;
+            }
+            // Fused compare-branch opcodes (WIDE: A:16=reg1, B:16=reg2, C:16=signed_offset)
+            case Opcode::JMP_IF_NOT_LT: {
+                int16_t offset = static_cast<int16_t>(wc);
+                if (!(S(wa).get_number() < S(wb).get_number())) ip += offset;
+                if (offset < 0) { CHECK_MEMORY_LIMIT(); }
+                break;
+            }
+            case Opcode::JMP_IF_NOT_LTE: {
+                int16_t offset = static_cast<int16_t>(wc);
+                if (!(S(wa).get_number() <= S(wb).get_number())) ip += offset;
+                if (offset < 0) { CHECK_MEMORY_LIMIT(); }
+                break;
+            }
+            case Opcode::JMP_IF_NOT_GT: {
+                int16_t offset = static_cast<int16_t>(wc);
+                if (!(S(wa).get_number() > S(wb).get_number())) ip += offset;
+                if (offset < 0) { CHECK_MEMORY_LIMIT(); }
+                break;
+            }
+            case Opcode::JMP_IF_NOT_GTE: {
+                int16_t offset = static_cast<int16_t>(wc);
+                if (!(S(wa).get_number() >= S(wb).get_number())) ip += offset;
+                if (offset < 0) { CHECK_MEMORY_LIMIT(); }
+                break;
+            }
+            case Opcode::JMP_IF_NOT_EQ: {
+                int16_t offset = static_cast<int16_t>(wc);
+                if (!(S(wa) == S(wb))) ip += offset;
+                if (offset < 0) { CHECK_MEMORY_LIMIT(); }
+                break;
+            }
             default:
                 runtime_error("Opcode %d cannot be used with WIDE prefix", wide_op);
                 RETURN_RUNTIME_ERROR;
@@ -2868,12 +2947,11 @@ Value VM::jit_call_direct(ObjClosure* closure, Value* args, int arg_count) {
     ObjFunction* func = closure->function;
 
     // Check if function has JIT code — call directly
-    auto jit_it = jit_cache_.compiled.find(func);
-    if (jit_it != jit_cache_.compiled.end()) {
-        int callee_abs = static_cast<int>(args - stack_) - 1; // closure is at args-1
+    if (func->jit_code) {
+        JITCode* jit_code = func->jit_code;
+        int callee_abs = static_cast<int>(args - stack_) - 1;
         int args_abs = callee_abs + 1;
 
-        // Set up call frame
         if (frame_count_ >= MAX_FRAMES) return Value();
         CallFrame* new_frame = &frames_[frame_count_++];
         new_frame->closure = closure;
@@ -2884,7 +2962,6 @@ Value VM::jit_call_direct(ObjClosure* closure, Value* args, int arg_count) {
         new_frame->caller_stack_top = stack_top_;
         new_frame->slots = &stack_[args_abs];
 
-        // Init unused registers to nil
         static constexpr uint64_t NIL_B = 0x7FFC000000000000ULL;
         int needed = func->register_count;
         for (int i = arg_count; i < needed; i++) {
@@ -2893,16 +2970,13 @@ Value VM::jit_call_direct(ObjClosure* closure, Value* args, int arg_count) {
         int new_top = args_abs + needed;
         if (new_top > stack_top_) stack_top_ = new_top;
 
-        // Call JIT code directly
         int jit_pc = 0;
-        JITResult result = jit_it->second->entry(stack_, args_abs, &jit_pc,
-                                                   func->constants.data(),
-                                                   callee_abs, stack_top_);
-        // Pop frame
+        jit_code->entry(stack_, args_abs, &jit_pc,
+                        func->constants.data(),
+                        callee_abs, stack_top_, closure);
         frame_count_--;
         stack_top_ = std::max(stack_top_, callee_abs + 1);
 
-        // Return result from stack[callee_abs]
         return stack_[callee_abs];
     }
 

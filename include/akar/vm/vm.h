@@ -103,6 +103,15 @@ public:
     uint16_t enum_type_counter_ = 0;      // global enum type ID counter
     uint32_t write_generation_ = 0;        // global write generation counter (for effect dedup)
 
+    // JIT helper access (public for JIT helper functions)
+    Value* jit_find_global(ObjString* name) {
+        auto it = globals_.find(name);
+        return it != globals_.end() ? &it->second : nullptr;
+    }
+    void jit_set_global_val(ObjString* name, Value val) {
+        globals_[name] = val;
+    }
+
 private:
     InterpretResult run();
 

@@ -207,6 +207,8 @@ struct ObjFunction : Obj {
     std::string name;
     int line = 0;
     std::vector<UpvalueDesc> upvalue_descs;
+    int jit_call_count = 0;        // JIT: number of times called
+    struct JITCode* jit_code = nullptr; // JIT: compiled native code (null = not compiled)
     ObjFunction() { type = ObjType::Function; }
 };
 

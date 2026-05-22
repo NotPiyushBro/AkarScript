@@ -26,48 +26,28 @@ JITCode::~JITCode() {
 // Helper functions called from JIT code
 // ============================================================
 
-// NaN-boxed bit patterns
 static constexpr int64_t NIL_BITS   = 0x7FFC000000000000LL;
 static constexpr int64_t FALSE_BITS = 0x7FF8000000000001LL;
 static constexpr int64_t TRUE_BITS  = 0x7FF8000000000002LL;
 static constexpr uint64_t NAN_BASE  = 0x7FF8000000000000ULL;
 
-// VM pointer set before JIT execution (used by call helpers)
 static VM* g_jit_vm = nullptr;
 
 void jit_set_vm(VM* vm) { g_jit_vm = vm; }
 
-// Helper: perform a function call from JIT code
-// Uses VM::jit_call_direct which avoids vector allocation and calls
-// JIT'd functions directly (native→native).
-// Returns NaN-boxed bits of result.
-static int64_t jit_call_helper(Value* callee_slot, int arg_count) {
-    Value callee = *callee_slot;
-    if (!callee.is_closure()) return NIL_BITS;
-    if (!g_jit_vm) return NIL_BITS;
-    ObjClosure* closure = callee.as_closure();
-    Value* args = callee_slot + 1; // args are right after callee on stack
-    Value result = g_jit_vm->jit_call_direct(closure, args, arg_count);
-    *callee_slot = result;
+// --- Utility ---
+static inline int64_t value_to_bits(Value v) {
     uint64_t bits;
-    std::memcpy(&bits, &result, 8);
+    std::memcpy(&bits, &v, 8);
     return static_cast<int64_t>(bits);
 }
-
-static int64_t jit_fmod(double a, double b) {
-    double r = std::fmod(a, b);
-    uint64_t bits;
-    std::memcpy(&bits, &r, 8);
-    return static_cast<int64_t>(bits);
+static inline Value bits_to_value(int64_t bits) {
+    Value v;
+    std::memcpy(&v, &bits, 8);
+    return v;
 }
 
-static int64_t jit_mod_eq_zero(double a, double b) {
-    return std::fmod(a, b) == 0.0
-        ? static_cast<int64_t>(TRUE_BITS)
-        : static_cast<int64_t>(FALSE_BITS);
-}
-
-// Helper: returns TRUE_BITS if value is truthy, FALSE_BITS otherwise
+// --- Truthiness ---
 static int64_t jit_is_truthy(int64_t bits) {
     uint64_t b = static_cast<uint64_t>(bits);
     if (b == FALSE_BITS || b == NIL_BITS) return FALSE_BITS;
@@ -75,6 +55,376 @@ static int64_t jit_is_truthy(int64_t bits) {
     if ((b & NAN_BASE) == NAN_BASE && (b & 0x0008000000000000ULL)) return TRUE_BITS;
     if ((b & NAN_BASE) != NAN_BASE) return TRUE_BITS;
     return FALSE_BITS;
+}
+
+// --- Mod helpers ---
+static int64_t jit_fmod(double a, double b) {
+    double r = std::fmod(a, b);
+    return value_to_bits(Value(r));
+}
+
+static int64_t jit_mod_eq_zero(double a, double b) {
+    return std::fmod(a, b) == 0.0 ? TRUE_BITS : FALSE_BITS;
+}
+
+// --- Bitwise helpers (operate on NaN-boxed doubles ↔ int64_t) ---
+static int64_t jit_bit_and(int64_t a, int64_t b) {
+    double da = bits_to_value(a).get_number();
+    double db = bits_to_value(b).get_number();
+    return value_to_bits(Value(static_cast<double>(
+        static_cast<int64_t>(da) & static_cast<int64_t>(db))));
+}
+static int64_t jit_bit_or(int64_t a, int64_t b) {
+    double da = bits_to_value(a).get_number();
+    double db = bits_to_value(b).get_number();
+    return value_to_bits(Value(static_cast<double>(
+        static_cast<int64_t>(da) | static_cast<int64_t>(db))));
+}
+static int64_t jit_bit_xor(int64_t a, int64_t b) {
+    double da = bits_to_value(a).get_number();
+    double db = bits_to_value(b).get_number();
+    return value_to_bits(Value(static_cast<double>(
+        static_cast<int64_t>(da) ^ static_cast<int64_t>(db))));
+}
+static int64_t jit_bit_not(int64_t a) {
+    double da = bits_to_value(a).get_number();
+    return value_to_bits(Value(static_cast<double>(~static_cast<int64_t>(da))));
+}
+static int64_t jit_shl(int64_t a, int64_t b) {
+    double da = bits_to_value(a).get_number();
+    double db = bits_to_value(b).get_number();
+    return value_to_bits(Value(static_cast<double>(
+        static_cast<int64_t>(da) << static_cast<int64_t>(db))));
+}
+static int64_t jit_shr(int64_t a, int64_t b) {
+    double da = bits_to_value(a).get_number();
+    double db = bits_to_value(b).get_number();
+    return value_to_bits(Value(static_cast<double>(
+        static_cast<int64_t>(da) >> static_cast<int64_t>(db))));
+}
+
+// --- Upvalue helpers ---
+static int64_t jit_get_upvalue(ObjClosure* closure, int index) {
+    if (!closure || index >= (int)closure->upvalues.size()) return NIL_BITS;
+    return value_to_bits(*closure->upvalues[index]->location);
+}
+static void jit_set_upvalue(ObjClosure* closure, int index, int64_t bits) {
+    if (!closure || index >= (int)closure->upvalues.size()) return;
+    *closure->upvalues[index]->location = bits_to_value(bits);
+}
+
+// --- Global helpers ---
+static int64_t jit_get_global(ObjString* name) {
+    if (!g_jit_vm || !name) return NIL_BITS;
+    Value* val = g_jit_vm->jit_find_global(name);
+    if (!val) return NIL_BITS;
+    return value_to_bits(*val);
+}
+static void jit_set_global(ObjString* name, int64_t bits) {
+    if (!g_jit_vm || !name) return;
+    g_jit_vm->jit_set_global_val(name, bits_to_value(bits));
+}
+
+// --- Call helper ---
+static int64_t jit_call_helper(Value* callee_slot, int arg_count) {
+    Value callee = *callee_slot;
+    if (!g_jit_vm) return NIL_BITS;
+    if (callee.is_closure()) {
+        ObjClosure* closure = callee.as_closure();
+        Value* args = callee_slot + 1;
+        Value result = g_jit_vm->jit_call_direct(closure, args, arg_count);
+        *callee_slot = result;
+        return value_to_bits(result);
+    }
+    if (callee.is_native()) {
+        // Call native function directly
+        ObjNative* native = callee.as_native();
+        Value* args = callee_slot + 1;
+        Value result = native->function(arg_count, args);
+        *callee_slot = result;
+        return value_to_bits(result);
+    }
+    return NIL_BITS;
+}
+
+// --- Array/Map helpers ---
+static int64_t jit_new_array(Value* elements, int count) {
+    auto* arr = allocate_array();
+    for (int i = 0; i < count; i++) arr->elements.push_back(elements[i]);
+    return value_to_bits(Value(static_cast<Obj*>(arr)));
+}
+static int64_t jit_new_map() {
+    auto* map = allocate_map();
+    return value_to_bits(Value(static_cast<Obj*>(map)));
+}
+static int64_t jit_get_index(int64_t obj_bits, int64_t idx_bits) {
+    Value obj = bits_to_value(obj_bits);
+    Value idx = bits_to_value(idx_bits);
+    if (obj.is_array() && idx.is_number()) {
+        auto* arr = obj.as_array();
+        int i = static_cast<int>(idx.get_number());
+        if (i < 0 || i >= (int)arr->elements.size()) return NIL_BITS;
+        return value_to_bits(arr->elements[i]);
+    }
+    if (obj.is_map() && idx.is_string()) {
+        auto* map = obj.as_map();
+        auto it = map->entries.find(idx.as_string()->value);
+        if (it == map->entries.end()) return NIL_BITS;
+        return value_to_bits(it->second);
+    }
+    if (obj.is_string() && idx.is_number()) {
+        auto* str = obj.as_string();
+        int i = static_cast<int>(idx.get_number());
+        if (i < 0 || i >= (int)str->value.size()) return NIL_BITS;
+        auto* ch = get_string_table().intern(std::string(1, str->value[i]));
+        return value_to_bits(Value(static_cast<Obj*>(ch)));
+    }
+    return NIL_BITS;
+}
+static void jit_set_index(int64_t obj_bits, int64_t idx_bits, int64_t val_bits) {
+    Value obj = bits_to_value(obj_bits);
+    Value idx = bits_to_value(idx_bits);
+    Value val = bits_to_value(val_bits);
+    if (obj.is_array() && idx.is_number()) {
+        auto* arr = obj.as_array();
+        int i = static_cast<int>(idx.get_number());
+        if (i >= 0 && i < (int)arr->elements.size()) arr->elements[i] = val;
+    }
+    if (obj.is_map() && idx.is_string()) {
+        auto* map = obj.as_map();
+        map->entries[idx.as_string()->value] = val;
+    }
+}
+
+// --- Field helpers ---
+static int64_t jit_get_field(int64_t obj_bits, ObjString* name) {
+    Value obj = bits_to_value(obj_bits);
+    if (obj.is_instance()) {
+        auto* inst = obj.as_instance();
+        auto it = inst->fields.find(name->value);
+        if (it != inst->fields.end()) return value_to_bits(it->second);
+        // Check getter
+        auto mit = inst->klass->methods.find(name->value);
+        if (mit != inst->klass->methods.end()) return value_to_bits(mit->second);
+    }
+    if (obj.is_array()) {
+        if (name->value == "length")
+            return value_to_bits(Value(static_cast<double>(obj.as_array()->elements.size())));
+    }
+    if (obj.is_string()) {
+        if (name->value == "length")
+            return value_to_bits(Value(static_cast<double>(obj.as_string()->value.size())));
+    }
+    if (obj.is_map()) {
+        if (name->value == "length")
+            return value_to_bits(Value(static_cast<double>(obj.as_map()->entries.size())));
+    }
+    return NIL_BITS;
+}
+static void jit_set_field(int64_t obj_bits, ObjString* name, int64_t val_bits) {
+    Value obj = bits_to_value(obj_bits);
+    if (obj.is_instance()) {
+        obj.as_instance()->fields[name->value] = bits_to_value(val_bits);
+    }
+}
+
+// --- Class/Object helpers ---
+static int64_t jit_new_class(ObjString* name) {
+    auto* klass = allocate_class(name->value);
+    return value_to_bits(Value(static_cast<Obj*>(klass)));
+}
+static int64_t jit_new_instance(int64_t klass_bits) {
+    Value klass_val = bits_to_value(klass_bits);
+    if (!klass_val.is_class()) return NIL_BITS;
+    auto* inst = allocate_instance(klass_val.as_class());
+    // Call init if exists
+    auto it = klass_val.as_class()->methods.find("init");
+    if (it != klass_val.as_class()->methods.end()) {
+        // Store init method for later CALL
+    }
+    return value_to_bits(Value(static_cast<Obj*>(inst)));
+}
+static int64_t jit_get_method(int64_t obj_bits, ObjString* name) {
+    Value obj = bits_to_value(obj_bits);
+    if (obj.is_instance()) {
+        auto it = obj.as_instance()->klass->methods.find(name->value);
+        if (it != obj.as_instance()->klass->methods.end()) return value_to_bits(it->second);
+    }
+    if (obj.is_class()) {
+        auto it = obj.as_class()->methods.find(name->value);
+        if (it != obj.as_class()->methods.end()) return value_to_bits(it->second);
+    }
+    // Array/string built-in methods
+    if (obj.is_array() || obj.is_string() || obj.is_map()) {
+        return value_to_bits(obj); // placeholder
+    }
+    return NIL_BITS;
+}
+
+// --- Iterator helpers ---
+static int64_t jit_new_range(int64_t start_bits, int64_t end_bits) {
+    auto* it = allocate_iterator();
+    it->kind = ObjIterator::RangeIter;
+    it->range_current = bits_to_value(start_bits).get_number();
+    it->range_end = bits_to_value(end_bits).get_number();
+    it->range_step = 1.0;
+    it->done = (it->range_current >= it->range_end);
+    return value_to_bits(Value(static_cast<Obj*>(it)));
+}
+static int64_t jit_iter_init(int64_t obj_bits) {
+    Value obj = bits_to_value(obj_bits);
+    if (obj.is_array()) {
+        auto* it = allocate_iterator();
+        it->kind = ObjIterator::ArrayIter;
+        it->arr = obj.as_array();
+        it->arr_index = 0;
+        it->done = it->arr->elements.empty();
+        return value_to_bits(Value(static_cast<Obj*>(it)));
+    }
+    if (obj.is_string()) {
+        auto* it = allocate_iterator();
+        it->kind = ObjIterator::StringIter;
+        it->str = obj.as_string();
+        it->str_index = 0;
+        it->done = it->str->value.empty();
+        return value_to_bits(Value(static_cast<Obj*>(it)));
+    }
+    if (obj.is_iterator()) {
+        return obj_bits; // already an iterator (range)
+    }
+    return NIL_BITS;
+}
+static int64_t jit_iter_next(int64_t iter_bits) {
+    Value iter_val = bits_to_value(iter_bits);
+    if (!iter_val.is_iterator()) return NIL_BITS;
+    auto* it = iter_val.as_iterator();
+    Value result;
+    switch (it->kind) {
+        case ObjIterator::ArrayIter:
+            if (it->arr_index < (int)it->arr->elements.size())
+                result = it->arr->elements[it->arr_index++];
+            it->done = (it->arr_index >= (int)it->arr->elements.size());
+            break;
+        case ObjIterator::RangeIter:
+            result = Value(it->range_current);
+            it->range_current += it->range_step;
+            it->done = (it->range_current >= it->range_end);
+            break;
+        case ObjIterator::StringIter:
+            if (it->str_index < (int)it->str->value.size()) {
+                auto* ch = get_string_table().intern(std::string(1, it->str->value[it->str_index]));
+                result = Value(static_cast<Obj*>(ch));
+            }
+            it->str_index++;
+            it->done = (it->str_index >= (int)it->str->value.size());
+            break;
+    }
+    return value_to_bits(result);
+}
+static int64_t jit_iter_done(int64_t iter_bits) {
+    Value iter_val = bits_to_value(iter_bits);
+    if (!iter_val.is_iterator()) return TRUE_BITS;
+    return iter_val.as_iterator()->done ? TRUE_BITS : FALSE_BITS;
+}
+
+// --- Print helper ---
+static void jit_print(int64_t bits) {
+    Value v = bits_to_value(bits);
+    printf("%s\n", v.to_string().c_str());
+}
+
+// --- Signal/Effect helpers ---
+static int64_t jit_signal_create(int64_t initial_bits, ObjString* name) {
+    Value initial = bits_to_value(initial_bits);
+    auto* sig = allocate_signal(initial, name ? name->value : "");
+    return value_to_bits(Value(static_cast<Obj*>(sig)));
+}
+static int64_t jit_signal_get(int64_t signal_bits) {
+    Value sv = bits_to_value(signal_bits);
+    if (!sv.is_signal()) return NIL_BITS;
+    // Track dependency if in effect
+    if (g_jit_vm && g_jit_vm->current_effect_) {
+        auto* sig = sv.as_signal();
+        auto* eff = g_jit_vm->current_effect_;
+        sig->subscribers.push_back(eff);
+        eff->dependencies.push_back(sig);
+    }
+    return value_to_bits(sv.as_signal()->value);
+}
+static void jit_signal_set(int64_t signal_bits, int64_t val_bits) {
+    Value sv = bits_to_value(signal_bits);
+    if (!sv.is_signal()) return;
+    auto* sig = sv.as_signal();
+    sig->value = bits_to_value(val_bits);
+    sig->write_generation++;
+    // Queue effects
+    if (g_jit_vm) {
+        g_jit_vm->write_generation_++;
+        for (auto* eff : sig->subscribers) {
+            if (eff->state != ObjEffect::State::Queued) {
+                eff->state = ObjEffect::State::Queued;
+                g_jit_vm->effect_queue_.push_back(eff);
+            }
+        }
+    }
+}
+static int64_t jit_effect_create(int64_t body_bits, ObjString* name) {
+    Value body_val = bits_to_value(body_bits);
+    if (!body_val.is_closure()) return NIL_BITS;
+    auto* eff = allocate_effect(body_val.as_closure(), name ? name->value : "");
+    return value_to_bits(Value(static_cast<Obj*>(eff)));
+}
+static void jit_effect_run(int64_t effect_bits) {
+    Value ev = bits_to_value(effect_bits);
+    if (!ev.is_effect() || !g_jit_vm) return;
+    auto* eff = ev.as_effect();
+    if (eff->state != ObjEffect::State::Queued) {
+        eff->state = ObjEffect::State::Queued;
+        g_jit_vm->effect_queue_.push_back(eff);
+    }
+}
+
+// --- Enum helpers ---
+static int64_t jit_enum_create(ObjString* name) {
+    if (!g_jit_vm) return NIL_BITS;
+    auto* klass = allocate_class(name->value);
+    g_jit_vm->enum_type_counter_++;
+    // Store enum type ID as a method (using double value)
+    klass->methods["__enum_type_id"] = Value(static_cast<double>(g_jit_vm->enum_type_counter_));
+    return value_to_bits(Value(static_cast<Obj*>(klass)));
+}
+static void jit_enum_variant(int64_t klass_bits, ObjString* variant_name, int64_t value_bits) {
+    Value kv = bits_to_value(klass_bits);
+    if (!kv.is_class()) return;
+    kv.as_class()->methods[variant_name->value] = bits_to_value(value_bits);
+}
+static void jit_enum_data_variant(int64_t klass_bits, ObjString* variant_name) {
+    Value kv = bits_to_value(klass_bits);
+    if (!kv.is_class()) return;
+    // Create a factory method that wraps data
+    auto* func = allocate_function();
+    func->arity = 1;
+    func->name = variant_name->value;
+    func->register_count = 4;
+    // Store as method - result is a data-carrying instance
+    auto* inst = allocate_instance(kv.as_class());
+    // Store variant name as a string value in methods
+    auto* variant_str = allocate_string(variant_name->value);
+    inst->fields["__variant"] = Value(static_cast<Obj*>(variant_str));
+    // Actually store a native factory
+    kv.as_class()->methods[variant_name->value] = Value(static_cast<Obj*>(inst));
+}
+static int64_t jit_enum_get(int64_t obj_bits, ObjString* variant_name) {
+    Value obj = bits_to_value(obj_bits);
+    if (obj.is_instance()) {
+        auto it = obj.as_instance()->fields.find(variant_name->value);
+        if (it != obj.as_instance()->fields.end()) return value_to_bits(it->second);
+    }
+    return NIL_BITS;
+}
+static int64_t jit_enum_is(int64_t obj_bits, ObjString* enum_name) {
+    // Simplified check
+    return (bits_to_value(obj_bits).is_instance() || is_enum_value(bits_to_value(obj_bits))) ? TRUE_BITS : FALSE_BITS;
 }
 
 // ============================================================
@@ -89,12 +439,14 @@ JITCompiler::~JITCompiler() = default;
 
 void JITCompiler::emit_bailout(int pc) {
     auto* b = backend_.get();
-    // *out_pc = pc
     b->emit_load_imm64(b->scratch0(), static_cast<uint64_t>(pc));
     b->emit_store_int(b->scratch0(), b->reg_outpc(), 0);
-    // Return Bailout
     b->emit_set_return(1);
     b->emit_epilogue();
+}
+
+void JITCompiler::emit_helper_call(void* func_addr) {
+    backend_->emit_call_indirect(func_addr);
 }
 
 bool JITCompiler::compile_instruction(int& pc) {
@@ -118,10 +470,14 @@ bool JITCompiler::compile_instruction(int& pc) {
     int R1 = b->scratch1();
     int D0 = b->fscratch0();
     int D1 = b->fscratch1();
+    int D2 = 2; // extra FP scratch (caller-saved on ARM64)
+    int D3 = 3; // extra FP scratch
 
     switch (static_cast<Opcode>(op)) {
 
-    // --- Load ---
+    // ================================================================
+    // LOADS
+    // ================================================================
 
     case Opcode::LOAD_IMM: {
         double d = static_cast<double>(b8);
@@ -131,38 +487,90 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_store_int(R0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::LOAD_CONST: {
         b->emit_load_int(R0, b->reg_const(), bx * 8);
         b->emit_store_int(R0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::LOAD_NIL: {
         b->emit_load_imm64(R0, static_cast<uint64_t>(NIL_BITS));
         b->emit_store_int(R0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::LOAD_TRUE: {
         b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS));
         b->emit_store_int(R0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::LOAD_FALSE: {
         b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS));
         b->emit_store_int(R0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::MOVE: {
         b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
         b->emit_store_int(R0, b->reg_base(), slot_offset(a));
         break;
     }
 
-    // --- Arithmetic (type-specialized) ---
+    // ================================================================
+    // LOCAL VARIABLE ACCESS (same as MOVE, just alias)
+    // ================================================================
+
+    case Opcode::GET_LOCAL: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::SET_LOCAL: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(a));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(b8));
+        break;
+    }
+
+    // ================================================================
+    // UPVALUE ACCESS
+    // ================================================================
+
+    case Opcode::GET_UPVALUE: {
+        // jit_get_upvalue(closure, index) → bits in X0
+        b->emit_mov(R0, b->reg_closure());
+        b->emit_load_imm64(R1, static_cast<uint64_t>(b8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_get_upvalue));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::SET_UPVALUE: {
+        // jit_set_upvalue(closure, index, bits)
+        b->emit_mov(R0, b->reg_closure());
+        b->emit_load_imm64(R1, static_cast<uint64_t>(b8));
+        b->emit_load_int(2, b->reg_base(), slot_offset(a)); // X2 = value bits
+        emit_helper_call(reinterpret_cast<void*>(&jit_set_upvalue));
+        break;
+    }
+
+    // ================================================================
+    // GLOBAL ACCESS
+    // ================================================================
+
+    case Opcode::GET_GLOBAL: {
+        // Load ObjString* name from constants[bx]
+        b->emit_load_int(R0, b->reg_const(), bx * 8); // X0 = name ObjString*
+        emit_helper_call(reinterpret_cast<void*>(&jit_get_global));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::SET_GLOBAL: {
+        // jit_set_global(name, bits)
+        b->emit_load_int(R0, b->reg_const(), bx * 8); // X0 = name
+        b->emit_load_int(R1, b->reg_base(), slot_offset(a)); // X1 = value bits
+        emit_helper_call(reinterpret_cast<void*>(&jit_set_global));
+        break;
+    }
+
+    // ================================================================
+    // ARITHMETIC (type-specialized)
+    // ================================================================
 
     case Opcode::ADD_NUM: {
         b->emit_load_fp(D0, b->reg_base(), slot_offset(b8));
@@ -171,7 +579,6 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::SUB_NUM: {
         b->emit_load_fp(D0, b->reg_base(), slot_offset(b8));
         b->emit_load_fp(D1, b->reg_base(), slot_offset(c8));
@@ -179,15 +586,16 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::MUL_NUM: {
         b->emit_load_fp(D0, b->reg_base(), slot_offset(b8));
-        b->emit_load_fp(D1, b->reg_base(), slot_offset(c8));
-        b->emit_fmul(D0, D0, D1);
+        if (b8 != c8) {
+            b->emit_load_fp(D1, b->reg_base(), slot_offset(c8));
+        }
+        b->emit_fmul(D0, D0, (b8 == c8) ? D0 : D1);
         b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
+        fp_cache_ = {true, slot_offset(a), D0};
         break;
     }
-
     case Opcode::DIV_NUM: {
         b->emit_load_fp(D0, b->reg_base(), slot_offset(b8));
         b->emit_load_fp(D1, b->reg_base(), slot_offset(c8));
@@ -195,17 +603,17 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::MOD_NUM: {
+        // Inline fmod using trunc-based formula: fmod(a,b) = a - trunc(a/b)*b
         b->emit_load_fp(D0, b->reg_base(), slot_offset(b8));
         b->emit_load_fp(D1, b->reg_base(), slot_offset(c8));
-        b->emit_call_indirect(reinterpret_cast<void*>(&jit_fmod));
-        // Result in D0 (as raw bits via X0 → store as int, then reload as FP)
-        // Actually jit_fmod returns int64_t bits in X0, store as int
-        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        b->emit_fdiv(D2, D0, D1);
+        b->emit_frintz(D2, D2);
+        b->emit_fmul(D2, D2, D1);
+        b->emit_fsub(D0, D0, D2);
+        b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::ADD_IMM: {
         b->emit_load_fp(D0, b->reg_base(), slot_offset(b8));
         double imm_d = static_cast<double>(c8);
@@ -217,23 +625,127 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
         break;
     }
-
-    case Opcode::MOD_EQ_ZERO: {
-        b->emit_load_fp(D0, b->reg_base(), slot_offset(b8));
-        b->emit_load_fp(D1, b->reg_base(), slot_offset(c8));
-        b->emit_call_indirect(reinterpret_cast<void*>(&jit_mod_eq_zero));
-        // Result is NaN-boxed bool in X0
+    case Opcode::ADD_STR: {
+        // String concatenation helper
+        static auto jit_add_str = [](int64_t a, int64_t b) -> int64_t {
+            Value va = bits_to_value(a);
+            Value vb = bits_to_value(b);
+            if (va.is_string() && vb.is_string()) {
+                auto* result = get_string_table().intern(
+                    va.as_string()->value + vb.as_string()->value);
+                return value_to_bits(Value(static_cast<Obj*>(result)));
+            }
+            return NIL_BITS;
+        };
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
+        emit_helper_call(reinterpret_cast<void*>(+jit_add_str));
         b->emit_store_int(R0, b->reg_base(), slot_offset(a));
         break;
     }
+    case Opcode::MOD_EQ_ZERO: {
+        // Inline fmod(n, i) == 0 check — avoids expensive C helper call
+        // fmod(a, b) = a - trunc(a/b) * b
+        b->emit_load_fp(D0, b->reg_base(), slot_offset(b8)); // D0 = n
+        b->emit_load_fp(D1, b->reg_base(), slot_offset(c8)); // D1 = i
+        b->emit_fdiv(D2, D0, D1);     // D2 = n / i
+        b->emit_frintz(D2, D2);       // D2 = trunc(n/i)
+        b->emit_fmul(D2, D2, D1);     // D2 = trunc(n/i) * i
+        b->emit_fsub(D2, D0, D2);     // D2 = n - trunc(n/i)*i = fmod(n, i)
+        // Compare fmod result with 0.0
+        b->emit_load_imm64(R0, 0);    // 0.0 has all-zero bit pattern
+        b->emit_fmov_from_int(D3, R0); // D3 = 0.0
+        b->emit_fcmp(D2, D3);
+        // Select TRUE_BITS if == 0, FALSE_BITS otherwise
+        size_t mod_zero_br = b->emit_branch_cond(b->cond_eq(), 0);
+        b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS));
+        size_t mod_skip = b->emit_branch(0);
+        size_t mod_true_pos = b->code_size();
+        b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS));
+        size_t mod_store_pos = b->code_size();
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        b->patch_branch(mod_zero_br, mod_true_pos);
+        b->patch_branch(mod_skip, mod_store_pos);
+        break;
+    }
 
-    // --- Generic arithmetic: bail ---
-    case Opcode::ADD: case Opcode::SUB:
-    case Opcode::MUL: case Opcode::DIV: case Opcode::MOD:
-        emit_bailout(start_pc);
-        return false;
+    // ================================================================
+    // GENERIC ARITHMETIC — type-checked fast path for numbers
+    // ================================================================
 
-    // --- Comparisons (type-specialized) ---
+    // Helper macro: load both operands, move to FP, check both are numbers.
+    // On success, D0/D1 hold the FP values and execution falls through.
+    // On failure, branches to bail_target (defined by EMIT_BAIL_PATH).
+    #define EMIT_NUM_GUARD(b8v, c8v) do { \
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8v)); \
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8v)); \
+        b->emit_fmov_from_int(D0, R0); \
+        b->emit_fmov_from_int(D1, R1); \
+        b->emit_lsr_imm(R0, R0, 51); \
+        b->emit_cmp_imm(R0, 0xFFF); \
+        _bail0 = b->emit_branch_cond(b->cond_eq(), 0); \
+        b->emit_lsr_imm(R1, R1, 51); \
+        b->emit_cmp_imm(R1, 0xFFF); \
+        _bail1 = b->emit_branch_cond(b->cond_eq(), 0); \
+    } while(0)
+
+    #define EMIT_BAIL_PATH(sp) do { \
+        _done_br = b->emit_branch(0); \
+        _bail_pos = b->code_size(); \
+        emit_bailout(sp); \
+        b->patch_branch(_bail0, _bail_pos); \
+        b->patch_branch(_bail1, _bail_pos); \
+        b->patch_branch(_done_br, b->code_size()); \
+    } while(0)
+
+    case Opcode::ADD: {
+        size_t _bail0, _bail1, _done_br, _bail_pos;
+        EMIT_NUM_GUARD(b8, c8);
+        b->emit_fadd(D0, D0, D1);
+        b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
+        EMIT_BAIL_PATH(start_pc);
+        break;
+    }
+    case Opcode::SUB: {
+        size_t _bail0, _bail1, _done_br, _bail_pos;
+        EMIT_NUM_GUARD(b8, c8);
+        b->emit_fsub(D0, D0, D1);
+        b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
+        EMIT_BAIL_PATH(start_pc);
+        break;
+    }
+    case Opcode::MUL: {
+        size_t _bail0, _bail1, _done_br, _bail_pos;
+        EMIT_NUM_GUARD(b8, c8);
+        b->emit_fmul(D0, D0, D1);
+        b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
+        EMIT_BAIL_PATH(start_pc);
+        break;
+    }
+    case Opcode::DIV: {
+        size_t _bail0, _bail1, _done_br, _bail_pos;
+        EMIT_NUM_GUARD(b8, c8);
+        b->emit_fdiv(D0, D0, D1);
+        b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
+        EMIT_BAIL_PATH(start_pc);
+        break;
+    }
+    case Opcode::MOD: {
+        size_t _bail0, _bail1, _done_br, _bail_pos;
+        EMIT_NUM_GUARD(b8, c8);
+        // fmod needs a helper call, but D0/D1 already hold the doubles
+        emit_helper_call(reinterpret_cast<void*>(&jit_fmod));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        EMIT_BAIL_PATH(start_pc);
+        break;
+    }
+
+    #undef EMIT_NUM_GUARD
+    #undef EMIT_BAIL_PATH
+
+    // ================================================================
+    // COMPARISONS (type-specialized)
+    // ================================================================
 
     #define EMIT_CMP_BRANCH_STORE(CC) do { \
         b->emit_load_fp(D0, b->reg_base(), slot_offset(b8)); \
@@ -259,13 +771,52 @@ bool JITCompiler::compile_instruction(int& pc) {
 
     #undef EMIT_CMP_BRANCH_STORE
 
-    case Opcode::EQ: case Opcode::NEQ:
-    case Opcode::LT: case Opcode::LTE:
-    case Opcode::GT: case Opcode::GTE:
-        emit_bailout(start_pc);
-        return false;
+    // ================================================================
+    // GENERIC COMPARISONS — type-checked fast path for numbers
+    // ================================================================
 
-    // --- Unary ---
+    #define EMIT_GENERIC_CMP(CC) do { \
+        size_t _bail0, _bail1, _done_br, _bail_pos; \
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8)); \
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8)); \
+        b->emit_fmov_from_int(D0, R0); \
+        b->emit_fmov_from_int(D1, R1); \
+        b->emit_lsr_imm(R0, R0, 51); \
+        b->emit_cmp_imm(R0, 0xFFF); \
+        _bail0 = b->emit_branch_cond(b->cond_eq(), 0); \
+        b->emit_lsr_imm(R1, R1, 51); \
+        b->emit_cmp_imm(R1, 0xFFF); \
+        _bail1 = b->emit_branch_cond(b->cond_eq(), 0); \
+        b->emit_fcmp(D0, D1); \
+        size_t _br = b->emit_branch_cond(b->CC(), 0); \
+        b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS)); \
+        size_t _skip = b->emit_branch(0); \
+        size_t _true_pos = b->code_size(); \
+        b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS)); \
+        size_t _store_pos = b->code_size(); \
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a)); \
+        b->patch_branch(_br, _true_pos); \
+        b->patch_branch(_skip, _store_pos); \
+        _done_br = b->emit_branch(0); \
+        _bail_pos = b->code_size(); \
+        emit_bailout(start_pc); \
+        b->patch_branch(_bail0, _bail_pos); \
+        b->patch_branch(_bail1, _bail_pos); \
+        b->patch_branch(_done_br, b->code_size()); \
+    } while(0)
+
+    case Opcode::EQ:  EMIT_GENERIC_CMP(cond_eq); break;
+    case Opcode::NEQ: EMIT_GENERIC_CMP(cond_ne); break;
+    case Opcode::LT:  EMIT_GENERIC_CMP(cond_lt); break;
+    case Opcode::LTE: EMIT_GENERIC_CMP(cond_le); break;
+    case Opcode::GT:  EMIT_GENERIC_CMP(cond_gt); break;
+    case Opcode::GTE: EMIT_GENERIC_CMP(cond_ge); break;
+
+    #undef EMIT_GENERIC_CMP
+
+    // ================================================================
+    // UNARY
+    // ================================================================
 
     case Opcode::NEG: {
         b->emit_load_fp(D0, b->reg_base(), slot_offset(b8));
@@ -273,21 +824,16 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
         break;
     }
-
     case Opcode::NOT: {
-        // Call jit_is_truthy, then negate
         b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
-        b->emit_call_indirect(reinterpret_cast<void*>(&jit_is_truthy));
-        // Result in X0: TRUE_BITS or FALSE_BITS. Negate by swapping.
-        // Load TRUE_BITS, compare, if equal store FALSE, else store TRUE
+        emit_helper_call(reinterpret_cast<void*>(&jit_is_truthy));
+        // Result is TRUE_BITS or FALSE_BITS. Negate by comparing.
         b->emit_load_imm64(R1, static_cast<uint64_t>(TRUE_BITS));
         b->emit_cmp(R0, R1);
         size_t was_true = b->emit_branch_cond(b->cond_eq(), 0);
-        // Was false/nil → store TRUE
         b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS));
         size_t skip = b->emit_branch(0);
         size_t false_pos = b->code_size();
-        // Was true → store FALSE
         b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS));
         size_t end_pos = b->code_size();
         b->emit_store_int(R0, b->reg_base(), slot_offset(a));
@@ -296,104 +842,464 @@ bool JITCompiler::compile_instruction(int& pc) {
         break;
     }
 
-    // --- Branches ---
+    // ================================================================
+    // CONTROL FLOW
+    // ================================================================
 
     case Opcode::JMP: {
-        // Interpreter's JMP: ip += offset (from instruction, NOT +4)
-        int target_pc = start_pc + sbx;
-        if (target_pc < 0 || target_pc >= static_cast<int>(bytecode_.size())) {
-            emit_bailout(start_pc);
-            return false;
+        // NOTE: JMP offset is relative to the JMP instruction itself (not next instruction)
+        // The interpreter does: ip += offset (where ip points to JMP)
+        // So target = start_pc + sbx (not pc + sbx, since pc is already past JMP)
+        int target_bc = start_pc + sbx;
+        if (sbx < 0) {
+            // Backward jump: target already compiled
+            if (target_bc >= 0 && target_bc / 4 < (int)bc_to_code_.size()) {
+                int target_code = bc_to_code_[target_bc / 4];
+                if (target_code >= 0) {
+                    size_t br = b->emit_branch(0);
+                    b->patch_branch(br, static_cast<size_t>(target_code));
+                } else {
+                    emit_bailout(start_pc);
+                    return false;
+                }
+            } else {
+                emit_bailout(start_pc);
+                return false;
+            }
+        } else if (sbx > 0) {
+            // Forward jump: add fixup
+            size_t br = b->emit_branch(0);
+            fixups_.push_back({br, target_bc, 0});
         }
-        size_t br = b->emit_branch(0);
-        fixups_.push_back({br, target_pc, 0});
+        // sbx == 0: no-op jump, skip
         break;
     }
 
     case Opcode::JMP_IF_FALSE: {
-        int target_pc = pc + sbx;
+        int target_bc = pc + sbx;
+        // Load value, call is_truthy, compare with TRUE_BITS
         b->emit_load_int(R0, b->reg_base(), slot_offset(a));
-        // Check FALSE_VAL
-        b->emit_load_imm64(R1, static_cast<uint64_t>(FALSE_BITS));
+        emit_helper_call(reinterpret_cast<void*>(&jit_is_truthy));
+        b->emit_load_imm64(R1, static_cast<uint64_t>(TRUE_BITS));
         b->emit_cmp(R0, R1);
-        size_t false_br = b->emit_branch_cond(b->cond_eq(), 0);
-        // Check NIL_VAL
-        b->emit_load_imm64(R1, static_cast<uint64_t>(NIL_BITS));
-        b->emit_cmp(R0, R1);
-        size_t nil_br = b->emit_branch_cond(b->cond_eq(), 0);
-        // Truthy: fall through
-        fixups_.push_back({false_br, target_pc, 1});
-        fixups_.push_back({nil_br, target_pc, 1});
+        // If NOT truthy (not equal to TRUE), branch to target
+        size_t br = b->emit_branch_cond(b->cond_ne(), 0);
+        if (sbx < 0) {
+            if (target_bc >= 0 && target_bc / 4 < (int)bc_to_code_.size()) {
+                int target_code = bc_to_code_[target_bc / 4];
+                if (target_code >= 0) {
+                    b->patch_branch(br, static_cast<size_t>(target_code));
+                } else {
+                    emit_bailout(start_pc);
+                    return false;
+                }
+            } else {
+                emit_bailout(start_pc);
+                return false;
+            }
+        } else if (sbx > 0) {
+            fixups_.push_back({br, target_bc, 1});
+        }
         break;
     }
 
     case Opcode::JMP_IF_TRUE: {
-        int target_pc = pc + sbx;
-        // For boolean results: check if NOT false and NOT nil → jump
+        int target_bc = pc + sbx;
         b->emit_load_int(R0, b->reg_base(), slot_offset(a));
-        // Check FALSE_VAL — if false, don't jump (fall through)
-        b->emit_load_imm64(R1, static_cast<uint64_t>(FALSE_BITS));
+        emit_helper_call(reinterpret_cast<void*>(&jit_is_truthy));
+        b->emit_load_imm64(R1, static_cast<uint64_t>(TRUE_BITS));
         b->emit_cmp(R0, R1);
-        size_t false_skip = b->emit_branch_cond(b->cond_eq(), 0);  // skip if false
-        // Check NIL_VAL — if nil, don't jump (fall through)
-        b->emit_load_imm64(R1, static_cast<uint64_t>(NIL_BITS));
-        b->emit_cmp(R0, R1);
-        size_t nil_skip = b->emit_branch_cond(b->cond_eq(), 0);    // skip if nil
-        // Truthy → jump to target
-        size_t truthy_br = b->emit_branch(0);
-        fixups_.push_back({truthy_br, target_pc, 0});
-        // False/nil fall through — patch skips to here
-        size_t fallthrough = b->code_size();
-        b->patch_branch(false_skip, fallthrough);
-        b->patch_branch(nil_skip, fallthrough);
+        // If truthy (equal to TRUE), branch to target
+        size_t br = b->emit_branch_cond(b->cond_eq(), 0);
+        if (sbx < 0) {
+            if (target_bc >= 0 && target_bc / 4 < (int)bc_to_code_.size()) {
+                int target_code = bc_to_code_[target_bc / 4];
+                if (target_code >= 0) {
+                    b->patch_branch(br, static_cast<size_t>(target_code));
+                } else {
+                    emit_bailout(start_pc);
+                    return false;
+                }
+            } else {
+                emit_bailout(start_pc);
+                return false;
+            }
+        } else if (sbx > 0) {
+            fixups_.push_back({br, target_bc, 1});
+        }
         break;
     }
 
-    // --- Fused compare-branch ---
-    // Interpreter advances ip by 4 first, then applies offset: target = (pc) + c8
-    // pc is already advanced by 4 in this function
+    // ================================================================
+    // FUSED COMPARE-BRANCH
+    // ================================================================
 
-    #define EMIT_FUSED_CMP_BRANCH(CC) do { \
-        int target_pc = pc + static_cast<int8_t>(c8); \
-        b->emit_load_fp(D0, b->reg_base(), slot_offset(a)); \
+    #define EMIT_FUSED_CMP_BRANCH(COND_FN, CMP_OP) do { \
+        int target_bc = pc + (int8_t)c8; \
+        if (fp_cache_.valid && fp_cache_.slot_byte_offset == slot_offset(a) && fp_cache_.fp_reg == D0) { \
+            /* D0 already has the cached value — skip LDR */ \
+        } else { \
+            b->emit_load_fp(D0, b->reg_base(), slot_offset(a)); \
+        } \
+        invalidate_fp_cache(); \
         b->emit_load_fp(D1, b->reg_base(), slot_offset(b8)); \
         b->emit_fcmp(D0, D1); \
-        size_t br = b->emit_branch_cond(b->CC(), 0); \
-        fixups_.push_back({br, target_pc, 1}); \
+        size_t br = b->emit_branch_cond(b->COND_FN(), 0); \
+        if ((int8_t)c8 < 0) { \
+            if (target_bc >= 0 && target_bc / 4 < (int)bc_to_code_.size()) { \
+                int tc = bc_to_code_[target_bc / 4]; \
+                if (tc >= 0) b->patch_branch(br, (size_t)tc); \
+                else { emit_bailout(start_pc); return false; } \
+            } else { emit_bailout(start_pc); return false; } \
+        } else if ((int8_t)c8 > 0) { \
+            fixups_.push_back({br, target_bc, 1}); \
+        } \
     } while(0)
 
-    case Opcode::JMP_IF_NOT_LT:  EMIT_FUSED_CMP_BRANCH(cond_ge); break;
-    case Opcode::JMP_IF_NOT_LTE: EMIT_FUSED_CMP_BRANCH(cond_gt); break;
-    case Opcode::JMP_IF_NOT_GT:  EMIT_FUSED_CMP_BRANCH(cond_le); break;
-    case Opcode::JMP_IF_NOT_GTE: EMIT_FUSED_CMP_BRANCH(cond_lt); break;
-    case Opcode::JMP_IF_NOT_EQ:  EMIT_FUSED_CMP_BRANCH(cond_ne); break;
+    // JMP_IF_NOT_LT: branch if NOT less => branch if GE
+    case Opcode::JMP_IF_NOT_LT:  EMIT_FUSED_CMP_BRANCH(cond_ge, ge); break;
+    // JMP_IF_NOT_LTE: branch if NOT less-or-equal => branch if GT
+    case Opcode::JMP_IF_NOT_LTE: EMIT_FUSED_CMP_BRANCH(cond_gt, gt); break;
+    // JMP_IF_NOT_GT: branch if NOT greater => branch if LE
+    case Opcode::JMP_IF_NOT_GT:  EMIT_FUSED_CMP_BRANCH(cond_le, le); break;
+    // JMP_IF_NOT_GTE: branch if NOT greater-or-equal => branch if LT
+    case Opcode::JMP_IF_NOT_GTE: EMIT_FUSED_CMP_BRANCH(cond_lt, lt); break;
+    // JMP_IF_NOT_EQ: branch if NOT equal => branch if NE
+    case Opcode::JMP_IF_NOT_EQ:  EMIT_FUSED_CMP_BRANCH(cond_ne, ne); break;
 
     #undef EMIT_FUSED_CMP_BRANCH
 
-    // --- Call: bail to interpreter (C function call overhead kills perf) ---
-    case Opcode::CALL:
+    // ================================================================
+    // BITWISE OPERATORS
+    // ================================================================
+
+    case Opcode::BIT_AND: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_bit_and));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::BIT_OR: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_bit_or));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::BIT_XOR: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_bit_xor));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::BIT_NOT: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_bit_not));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::SHL: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_shl));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::SHR: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_shr));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+
+    // ================================================================
+    // FUNCTION CALLS
+    // ================================================================
+
+    case Opcode::CALL: {
+        // jit_call_helper(callee_slot, arg_count) → result bits in X0
+        // callee_slot = &stack[base + a] = REG_BASE + a*8
+        b->emit_load_imm64(R0, static_cast<uint64_t>(a * 8));
+        b->emit_add(R0, b->reg_base(), R0); // X0 = &stack[base + a]
+        b->emit_load_imm64(R1, static_cast<uint64_t>(c8)); // arg_count = C
+        emit_helper_call(reinterpret_cast<void*>(&jit_call_helper));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+
+    case Opcode::TAIL_CALL: {
+        // Bail on tail calls for now
         emit_bailout(start_pc);
         return false;
+    }
 
-    // --- Return: store result at stack[callee_pos], return Done ---
+    // ================================================================
+    // CLOSURE / UPVALUE CLOSE
+    // ================================================================
+
+    case Opcode::CLOSURE: {
+        // Complex: needs inline upvalue descriptors in bytecode
+        emit_bailout(start_pc);
+        return false;
+    }
+    case Opcode::CLOSE_UPVALUE: {
+        emit_bailout(start_pc);
+        return false;
+    }
+
+    // ================================================================
+    // RETURN
+    // ================================================================
+
     case Opcode::RETURN: {
-        // Load return value from stack[base + a] into R0
         b->emit_load_int(R0, b->reg_base(), slot_offset(a));
         // Compute &stack_[callee_pos] = R_STACK + callee_pos * 8
-        // callee_pos is in R_CALLEE (X23). Multiply by 8 via 3 doublings.
-        b->emit_add(b->scratch1(), b->reg_callee(), b->reg_callee()); // ×2
-        b->emit_add(b->scratch1(), b->scratch1(), b->scratch1());     // ×4
-        b->emit_add(b->scratch1(), b->scratch1(), b->scratch1());     // ×8
-        b->emit_add(b->scratch1(), b->scratch1(), b->reg_stack());    // + &stack_[0]
-        // Store return value at stack[callee_pos]
-        b->emit_store_int(R0, b->scratch1(), 0);
-        // Return Done (0)
+        b->emit_add(R1, b->reg_callee(), b->reg_callee()); // ×2
+        b->emit_add(R1, R1, R1);     // ×4
+        b->emit_add(R1, R1, R1);     // ×8
+        b->emit_add(R1, R1, b->reg_stack()); // + &stack_[0]
+        b->emit_store_int(R0, R1, 0);
         b->emit_set_return(0);
         b->emit_epilogue();
         break;
     }
 
-    // --- Everything else: bail ---
+    // ================================================================
+    // DATA STRUCTURES
+    // ================================================================
+
+    case Opcode::NEW_ARRAY: {
+        // jit_new_array(elements_ptr, count) → bits
+        // elements are at stack[base + a + 1] .. stack[base + a + b]
+        b->emit_load_imm64(R0, static_cast<uint64_t>((a + 1) * 8));
+        b->emit_add(R0, b->reg_base(), R0); // X0 = &stack[base + a + 1]
+        b->emit_load_imm64(R1, static_cast<uint64_t>(b8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_new_array));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::NEW_MAP: {
+        emit_helper_call(reinterpret_cast<void*>(&jit_new_map));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::GET_INDEX: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_get_index));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::SET_INDEX: {
+        // jit_set_index(obj, idx, val)
+        b->emit_load_int(R0, b->reg_base(), slot_offset(a));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(2, b->reg_base(), slot_offset(c8)); // X2 = value
+        emit_helper_call(reinterpret_cast<void*>(&jit_set_index));
+        break;
+    }
+
+    // ================================================================
+    // FIELD ACCESS
+    // ================================================================
+
+    case Opcode::GET_FIELD: {
+        // Bail on GET_FIELD - field access can be fragile in JIT with GC
+        emit_bailout(start_pc);
+        return false;
+    }
+    case Opcode::SET_FIELD: {
+        // Bail on SET_FIELD - method field writes can be fragile in JIT
+        emit_bailout(start_pc);
+        return false;
+    }
+
+    // ================================================================
+    // CLASS / OBJECT
+    // ================================================================
+
+    case Opcode::NEW_CLASS: {
+        b->emit_load_int(R0, b->reg_const(), bx * 8); // X0 = name ObjString*
+        emit_helper_call(reinterpret_cast<void*>(&jit_new_class));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::NEW_INSTANCE: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_new_instance));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::GET_METHOD: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_const(), c8 * 8);
+        emit_helper_call(reinterpret_cast<void*>(&jit_get_method));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::INVOKE: {
+        // Complex: combined method lookup + call
+        emit_bailout(start_pc);
+        return false;
+    }
+
+    // ================================================================
+    // RANGE / ITERATOR
+    // ================================================================
+
+    case Opcode::NEW_RANGE: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_new_range));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::ITER_INIT: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_iter_init));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::ITER_NEXT: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_iter_next));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::ITER_DONE: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_iter_done));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+
+    // ================================================================
+    // SPECIAL
+    // ================================================================
+
+    case Opcode::PRINT: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(a));
+        emit_helper_call(reinterpret_cast<void*>(&jit_print));
+        break;
+    }
+    case Opcode::HALT: {
+        b->emit_set_return(0);
+        b->emit_epilogue();
+        break;
+    }
+    case Opcode::NOP:
+        break;
+
+    // ================================================================
+    // FIBER / COROUTINE — bail
+    // ================================================================
+
+    case Opcode::FIBER_YIELD:
+    case Opcode::FIBER_RESUME:
+        emit_bailout(start_pc);
+        return false;
+
+    // ================================================================
+    // AWAIT / EXCEPTION — bail
+    // ================================================================
+
+    case Opcode::AWAIT:
+    case Opcode::THROW:
+    case Opcode::TRY_BEGIN:
+    case Opcode::TRY_END:
+        emit_bailout(start_pc);
+        return false;
+
+    // ================================================================
+    // WIDE PREFIX — bail
+    // ================================================================
+
+    case Opcode::WIDE:
+        emit_bailout(start_pc);
+        return false;
+
+    // ================================================================
+    // SIGNAL & EFFECT
+    // ================================================================
+
+    case Opcode::SIGNAL_CREATE: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        // Load signal name from a debug constant (or empty)
+        b->emit_load_imm64(R1, 0); // NULL name
+        emit_helper_call(reinterpret_cast<void*>(&jit_signal_create));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::SIGNAL_GET: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_signal_get));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::SIGNAL_SET: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(a));
+        b->emit_load_int(R1, b->reg_base(), slot_offset(b8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_signal_set));
+        break;
+    }
+    case Opcode::EFFECT_CREATE: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_imm64(R1, 0); // NULL name
+        emit_helper_call(reinterpret_cast<void*>(&jit_effect_create));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::EFFECT_RUN: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(a));
+        emit_helper_call(reinterpret_cast<void*>(&jit_effect_run));
+        break;
+    }
+
+    // ================================================================
+    // ENUM
+    // ================================================================
+
+    case Opcode::ENUM_CREATE: {
+        b->emit_load_int(R0, b->reg_const(), bx * 8);
+        emit_helper_call(reinterpret_cast<void*>(&jit_enum_create));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::ENUM_VARIANT: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(a));
+        b->emit_load_int(R1, b->reg_const(), b8 * 8);
+        b->emit_load_int(2, b->reg_base(), slot_offset(c8));
+        emit_helper_call(reinterpret_cast<void*>(&jit_enum_variant));
+        break;
+    }
+    case Opcode::ENUM_DATA_VARIANT: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(a));
+        b->emit_load_int(R1, b->reg_const(), bx * 8);
+        emit_helper_call(reinterpret_cast<void*>(&jit_enum_data_variant));
+        break;
+    }
+    case Opcode::ENUM_GET: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_const(), c8 * 8);
+        emit_helper_call(reinterpret_cast<void*>(&jit_enum_get));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+    case Opcode::ENUM_IS: {
+        b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
+        b->emit_load_int(R1, b->reg_const(), c8 * 8);
+        emit_helper_call(reinterpret_cast<void*>(&jit_enum_is));
+        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+        break;
+    }
+
+    // ================================================================
+    // DEFAULT: bail
+    // ================================================================
+
     default:
         emit_bailout(start_pc);
         return false;
@@ -418,8 +1324,12 @@ JITCode* JITCompiler::compile(ObjFunction* function) {
     if (function->bytecode.size() < 16) return nullptr;
     if (!backend_) return nullptr;
 
+    // Skip functions that capture upvalues (closures) — fragile in JIT
+    if (!function->upvalue_descs.empty()) return nullptr;
+
     backend_->reset();
     fixups_.clear();
+    invalidate_fp_cache();
     bytecode_ = function->bytecode;
     constants_ = function->constants;
 
@@ -452,11 +1362,12 @@ JITCode* JITCompiler::compile(ObjFunction* function) {
 // ============================================================
 
 JITCode* JITCache::get_or_compile(ObjFunction* func) {
-    auto it = compiled.find(func);
-    if (it != compiled.end()) return it->second;
-
+    if (func->jit_code) return func->jit_code;
     JITCode* code = compiler.compile(func);
-    if (code) compiled[func] = code;
+    if (code) {
+        compiled[func] = code;
+        func->jit_code = code;
+    }
     return code;
 }
 

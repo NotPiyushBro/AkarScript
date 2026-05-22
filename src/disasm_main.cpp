@@ -25,6 +25,7 @@ static const char* op_names[] = {
     "EFFECT_CREATE","EFFECT_RUN",
     "ENUM_CREATE","ENUM_VARIANT","ENUM_DATA_VARIANT",
     "ENUM_GET","ENUM_IS",
+    "BIT_AND","BIT_OR","BIT_XOR","BIT_NOT","SHL","SHR",
 };
 
 static const char* opn(uint8_t op) {
@@ -94,7 +95,7 @@ static void disasm(const std::string& label, const std::vector<uint8_t>& bc,
         size_t addr=pos;
         uint8_t op=bc[pos++];
 
-        if(op==68) { // WIDE
+        if(op==75) { // WIDE
             if(pos+7>bc.size()){printf("%s  %4zu: WIDE <truncated>\n",pad.c_str(),addr);break;}
             uint8_t wop=bc[pos++];
             uint16_t wa=(bc[pos]<<8)|bc[pos+1]; pos+=2;
@@ -169,13 +170,13 @@ static void disasm(const std::string& label, const std::vector<uint8_t>& bc,
         case 45: printf("%s  %4zu: PRINT         R%u\n",pad.c_str(),addr,a); break;
         case 46: printf("%s  %4zu: HALT\n",pad.c_str(),addr); break;
         case 47: printf("%s  %4zu: NOP\n",pad.c_str(),addr); break;
-        case 48: printf("%s  %4zu: TO_STRING     R%u = str(R%u)\n",pad.c_str(),addr,a,b); break;
-        case 49: printf("%s  %4zu: ADD_NUM       R%u = R%u + R%u\n",pad.c_str(),addr,a,b,c); break;
-        case 50: printf("%s  %4zu: SUB_NUM       R%u = R%u - R%u\n",pad.c_str(),addr,a,b,c); break;
-        case 51: printf("%s  %4zu: MUL_NUM       R%u = R%u * R%u\n",pad.c_str(),addr,a,b,c); break;
-        case 52: printf("%s  %4zu: DIV_NUM       R%u = R%u / R%u\n",pad.c_str(),addr,a,b,c); break;
-        case 53: printf("%s  %4zu: MOD_NUM       R%u = R%u %% R%u\n",pad.c_str(),addr,a,b,c); break;
-        case 54: printf("%s  %4zu: ADD_STR       R%u = R%u .. R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 48: printf("%s  %4zu: ADD_NUM       R%u = R%u + R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 49: printf("%s  %4zu: SUB_NUM       R%u = R%u - R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 50: printf("%s  %4zu: MUL_NUM       R%u = R%u * R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 51: printf("%s  %4zu: DIV_NUM       R%u = R%u / R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 52: printf("%s  %4zu: MOD_NUM       R%u = R%u %% R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 53: printf("%s  %4zu: ADD_STR       R%u = R%u .. R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 54: printf("%s  %4zu: EQ_NUM        R%u = R%u == R%u\n",pad.c_str(),addr,a,b,c); break;
         case 55: printf("%s  %4zu: NEQ_NUM       R%u = R%u != R%u\n",pad.c_str(),addr,a,b,c); break;
         case 56: printf("%s  %4zu: LT_NUM        R%u = R%u < R%u\n",pad.c_str(),addr,a,b,c); break;
         case 57: printf("%s  %4zu: LTE_NUM       R%u = R%u <= R%u\n",pad.c_str(),addr,a,b,c); break;
@@ -210,6 +211,12 @@ static void disasm(const std::string& label, const std::vector<uint8_t>& bc,
             (c<consts.size())?fmt(consts[c],strs).c_str():"?"); break;
         case 85: printf("%s  %4zu: ENUM_IS       R%u = is_enum(R%u, %s)\n",pad.c_str(),addr,a,b,
             (c<consts.size())?fmt(consts[c],strs).c_str():"?"); break;
+        case 86: printf("%s  %4zu: BIT_AND       R%u = R%u & R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 87: printf("%s  %4zu: BIT_OR        R%u = R%u | R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 88: printf("%s  %4zu: BIT_XOR       R%u = R%u ^ R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 89: printf("%s  %4zu: BIT_NOT       R%u = ~R%u\n",pad.c_str(),addr,a,b); break;
+        case 90: printf("%s  %4zu: SHL           R%u = R%u << R%u\n",pad.c_str(),addr,a,b,c); break;
+        case 91: printf("%s  %4zu: SHR           R%u = R%u >> R%u\n",pad.c_str(),addr,a,b,c); break;
         default: printf("%s  %4zu: ???(%u) R%u R%u R%u\n",pad.c_str(),addr,op,a,b,c); break;
         }
     }

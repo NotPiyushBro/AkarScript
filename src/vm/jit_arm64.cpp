@@ -52,6 +52,9 @@ static inline uint32_t enc_fcmp(int dn, int dm) {
 static inline uint32_t enc_fmov_from_x(int dd, int xn) {
     return 0x9E670000u | ((xn & 0x1Fu) << 5) | (dd & 0x1Fu);
 }
+static inline uint32_t enc_fmov_to_x(int xd, int dn) {
+    return 0x9E660000u | ((dn & 0x1Fu) << 5) | (xd & 0x1Fu);
+}
 static inline uint32_t enc_mov_reg(int rd, int rm) {
     return 0xAA0003E0u | ((rm & 0x1Fu) << 16) | (rd & 0x1Fu);
 }
@@ -73,11 +76,11 @@ static inline uint32_t enc_ldp(int rt1, int rt2, int rn, int imm7) {
 static inline uint32_t enc_blr(int rn) {
     return 0xD63F0000u | ((rn & 0x1Fu) << 5);
 }
+
 static constexpr uint32_t ENC_NOP  = 0xD503201Fu;
 static constexpr uint32_t ENC_RET  = 0xD65F03C0u;
+static constexpr uint32_t ENC_MOV_W0_0 = 0x52800000u; // MOV W0, #0
 static constexpr uint32_t ENC_MOV_W0_1 = 0x52800020u; // MOV W0, #1
-static constexpr uint32_t ENC_ADD_SP_64 = 0x910103FFu; // ADD SP, SP, #64
-static constexpr uint32_t ENC_SUB_SP_64 = 0xD10103FFu; // SUB SP, SP, #64
 
 // ============================================================
 // ARM64Backend
@@ -92,6 +95,7 @@ public:
     static constexpr int R_CONST  = 22;  // X22 = &constants[0]
     static constexpr int R_CALLEE = 23;  // X23 = callee_pos (for RETURN)
     static constexpr int R_CALLER = 24;  // X24 = caller_top (for RETURN)
+    static constexpr int R_CLOSURE = 25; // X25 = closure pointer
 
     // Scratch (caller-saved)
     static constexpr int R_SCRATCH0 = 0;  // X0
@@ -118,43 +122,47 @@ public:
     int reg_const()  const override { return R_CONST; }
     int reg_callee() const override { return R_CALLEE; }
     int reg_caller() const override { return R_CALLER; }
+    int reg_closure() const override { return R_CLOSURE; }
     int scratch0()   const override { return R_SCRATCH0; }
     int scratch1()   const override { return R_SCRATCH1; }
     int fscratch0()  const override { return FR_SCRATCH0; }
     int fscratch1()  const override { return FR_SCRATCH1; }
 
     void emit_prologue() override {
-        // Frame: [SP+0]=X29/X30, [SP+16]=X19/X20, [SP+32]=X21/X22, [SP+48]=X23/X24
-        emit32(ENC_SUB_SP_64);
+        // Frame: [SP+0]=X29/X30, [SP+16]=X19/X20, [SP+32]=X21/X22, [SP+48]=X23/X24, [SP+64]=X25/X26
+        emit32(0xD10183FFu); // SUB SP, SP, #96
         emit32(enc_stp(29, 30, 31, 0));
         emit32(enc_stp(19, 20, 31, 16));
         emit32(enc_stp(21, 22, 31, 32));
         emit32(enc_stp(23, 24, 31, 48));
+        emit32(enc_stp(25, 26, 31, 64));
         emit32(enc_mov_reg(29, 31));
 
-        // Args: X0=stack, W1=base, X2=out_pc, X3=constants, W4=callee_pos, W5=caller_top
+        // Args: X0=stack, W1=base, X2=out_pc, X3=constants, W4=callee_pos, W5=caller_top, X6=closure
         emit32(enc_mov_reg(R_STACK, 0));        // X19 = stack
         emit32(enc_mov_reg(R_OUTPC, 2));        // X20 = out_pc
         emit32(0x8B010E60u | (R_BASE & 0x1Fu)); // ADD X21, X19, X1, LSL #3
         emit32(enc_mov_reg(R_CONST, 3));        // X22 = constants
         emit32(enc_mov_reg(R_CALLEE, 4));       // X23 = callee_pos
         emit32(enc_mov_reg(R_CALLER, 5));       // X24 = caller_top
+        emit32(enc_mov_reg(R_CLOSURE, 6));      // X25 = closure
     }
 
     void emit_epilogue() override {
+        emit32(enc_ldp(25, 26, 31, 64));
         emit32(enc_ldp(23, 24, 31, 48));
         emit32(enc_ldp(21, 22, 31, 32));
         emit32(enc_ldp(19, 20, 31, 16));
         emit32(enc_ldp(29, 30, 31, 0));
-        emit32(ENC_ADD_SP_64);
+        emit32(0x910183FFu); // ADD SP, SP, #96
         emit32(ENC_RET);
     }
 
     void emit_set_return(int value) override {
         if (value == 0)
-            emit32(0x52800000u); // MOV W0, #0
+            emit32(ENC_MOV_W0_0);
         else
-            emit32(ENC_MOV_W0_1); // MOV W0, #1
+            emit32(ENC_MOV_W0_1);
     }
 
     void emit_load_int(int dest, int base, int offset) override {
@@ -193,6 +201,38 @@ public:
         emit32(0x8B000000u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
     }
 
+    void emit_sub(int dest, int src1, int src2) override {
+        emit32(0xCB000000u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
+    void emit_and(int dest, int src1, int src2) override {
+        emit32(0x8A000000u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
+    void emit_orr(int dest, int src1, int src2) override {
+        emit32(0xAA000000u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
+    void emit_eor(int dest, int src1, int src2) override {
+        emit32(0xCA000000u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
+    void emit_lsl(int dest, int src, int shift) override {
+        emit32(0xD3400000u | (((64 - shift) & 0x3Fu) << 16) | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
+    void emit_lsr(int dest, int src, int shift) override {
+        emit32(0xD3400000u | ((shift & 0x3Fu) << 16) | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
+    void emit_mvn(int dest, int src) override {
+        emit32(0xAA2003E0u | ((src & 0x1Fu) << 16) | (dest & 0x1Fu));
+    }
+
+    void emit_sxtw(int dest, int src) override {
+        emit32(0x93407C00u | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
     void emit_fadd(int d, int s1, int s2) override { emit32(enc_fadd(d, s1, s2)); }
     void emit_fsub(int d, int s1, int s2) override { emit32(enc_fsub(d, s1, s2)); }
     void emit_fmul(int d, int s1, int s2) override { emit32(enc_fmul(d, s1, s2)); }
@@ -200,8 +240,23 @@ public:
     void emit_fneg(int d, int s) override { emit32(enc_fneg(d, s)); }
     void emit_fcmp(int s1, int s2) override { emit32(enc_fcmp(s1, s2)); }
     void emit_fmov_from_int(int fd, int si) override { emit32(enc_fmov_from_x(fd, si)); }
+    void emit_fmov_to_int(int dest_int, int src_fp) override { emit32(enc_fmov_to_x(dest_int, src_fp)); }
+    void emit_frintz(int dd, int dn) override {
+        // FRINTZ Dd, Dn — round toward zero (truncate)
+        emit32(0x1E65C000u | ((dn & 0x1Fu) << 5) | (dd & 0x1Fu));
+    }
 
     void emit_cmp(int s1, int s2) override { emit32(enc_cmp(s1, s2)); }
+
+    void emit_cmp_imm(int src, uint64_t imm) override {
+        // SUBS XZR, Xn, #imm12 (12-bit unsigned immediate)
+        emit32(0xF1000000u | ((static_cast<uint32_t>(imm) & 0xFFFu) << 10) | ((src & 0x1Fu) << 5) | 31u);
+    }
+
+    void emit_lsr_imm(int dest, int src, int shift) override {
+        // UBFM Xd, Xn, #shift, #63
+        emit32(0xD3400000u | ((shift & 0x3Fu) << 16) | (63u << 10) | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
 
     int cond_eq() const override { return CC_EQ; }
     int cond_ne() const override { return CC_NE; }

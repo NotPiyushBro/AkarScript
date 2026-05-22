@@ -39,6 +39,7 @@ ObjFunction* CodeGenerator::compile(const ASTPtr& ast) {
     free_register();
 
     func->register_count = scope.max_registers;
+    peephole_optimize(func->bytecode);
     return func;
 }
 
@@ -713,8 +714,10 @@ fallback:
         // Propagate type from value to local register
         set_reg_type(local, get_reg_type(val));
         emit(op_byte(Opcode::MOVE), local, val, 0);
-        set_reg_type(reg, get_reg_type(val));
-        emit(op_byte(Opcode::MOVE), reg, val, 0);
+        if (reg != local) {
+            set_reg_type(reg, get_reg_type(val));
+            emit(op_byte(Opcode::MOVE), reg, val, 0);
+        }
         free_register(); // val
         return;
     }
@@ -1016,24 +1019,20 @@ void CodeGenerator::compile_return(ReturnStmt* node) {
 void CodeGenerator::compile_let(LetStmt* node) {
     if (node->initializer) {
         int init_reg = compile_expr(node->initializer);
+        // Declare as local for fast register access in hot loops
+        declare_local(node->name, init_reg);
+        // Also set as global so get_global() API can find it
         if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
-            // Top-level: set as global
             uint16_t name_const = make_identifier_constant(node->name);
             emit_bx(op_byte(Opcode::SET_GLOBAL), init_reg, name_const);
-            free_register(); // free the init_reg
-        } else {
-            // init_reg is already allocated by compile_expr, use it directly as the local
-            declare_local(node->name, init_reg);
         }
     } else {
         int reg = alloc_register();
         emit(op_byte(Opcode::LOAD_NIL), reg, 0, 0);
+        declare_local(node->name, reg);
         if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
             uint16_t name_const = make_identifier_constant(node->name);
             emit_bx(op_byte(Opcode::SET_GLOBAL), reg, name_const);
-            free_register();
-        } else {
-            declare_local(node->name, reg);
         }
     }
 }
@@ -1716,7 +1715,7 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
 
         size_t next = i + 4;
         if (next + 4 > len) break;
-        if (bytecode[next] != op_byte(Opcode::ADD)) continue;
+        if (bytecode[next] != op_byte(Opcode::ADD) && bytecode[next] != op_byte(Opcode::ADD_NUM)) continue;
 
         uint8_t add_a = bytecode[next + 1];
         uint8_t add_b = bytecode[next + 2];
@@ -1741,9 +1740,13 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
     for (size_t i = 0; i + 8 <= len; i += 4) {
         uint8_t op = bytecode[i];
         Opcode cmp_op = static_cast<Opcode>(op);
+        // Handle both base and quickened (type-specialized) comparison opcodes
         if (cmp_op != Opcode::LT && cmp_op != Opcode::LTE &&
             cmp_op != Opcode::GT && cmp_op != Opcode::GTE &&
-            cmp_op != Opcode::EQ) continue;
+            cmp_op != Opcode::EQ &&
+            cmp_op != Opcode::LT_NUM && cmp_op != Opcode::LTE_NUM &&
+            cmp_op != Opcode::GT_NUM && cmp_op != Opcode::GTE_NUM &&
+            cmp_op != Opcode::EQ_NUM) continue;
 
         uint8_t cmp_a = bytecode[i + 1];
         uint8_t cmp_b = bytecode[i + 2];
@@ -1761,11 +1764,11 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
 
         Opcode fused;
         switch (cmp_op) {
-            case Opcode::LT:  fused = Opcode::JMP_IF_NOT_LT;  break;
-            case Opcode::LTE: fused = Opcode::JMP_IF_NOT_LTE; break;
-            case Opcode::GT:  fused = Opcode::JMP_IF_NOT_GT;  break;
-            case Opcode::GTE: fused = Opcode::JMP_IF_NOT_GTE; break;
-            case Opcode::EQ:  fused = Opcode::JMP_IF_NOT_EQ;  break;
+            case Opcode::LT:  case Opcode::LT_NUM:   fused = Opcode::JMP_IF_NOT_LT;  break;
+            case Opcode::LTE: case Opcode::LTE_NUM:  fused = Opcode::JMP_IF_NOT_LTE; break;
+            case Opcode::GT:  case Opcode::GT_NUM:   fused = Opcode::JMP_IF_NOT_GT;  break;
+            case Opcode::GTE: case Opcode::GTE_NUM:  fused = Opcode::JMP_IF_NOT_GTE; break;
+            case Opcode::EQ:  case Opcode::EQ_NUM:   fused = Opcode::JMP_IF_NOT_EQ;  break;
             default: continue;
         }
 
@@ -1774,6 +1777,28 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
         bytecode[i + 2] = cmp_c;
         bytecode[i + 3] = static_cast<uint8_t>(new_offset & 0xFF);
         bytecode[next] = op_byte(Opcode::NOP);
+    }
+
+    // --- Pass 2b: Eliminate dead MOVE before backward JMP ---
+    // Pattern: MOVE Rdest, Rsrc followed by JMP backward where the target writes Rdest
+    for (size_t i = 0; i + 8 <= len; i += 4) {
+        if (bytecode[i] != op_byte(Opcode::MOVE)) continue;
+        uint8_t move_dest = bytecode[i + 1];
+        size_t next = i + 4;
+        if (next + 4 > len) continue;
+        if (bytecode[next] != op_byte(Opcode::JMP)) continue;
+        // Check if the JMP target writes to move_dest
+        int16_t jmp_offset = static_cast<int16_t>((bytecode[next + 2] << 8) | bytecode[next + 3]);
+        size_t target = next + 4 + jmp_offset;
+        if (target >= len || target == next) continue;
+        // Only eliminate if jumping backwards (loop)
+        if (jmp_offset >= 0) continue;
+        uint8_t target_op = bytecode[target];
+        // Check if the target instruction writes to the same register
+        if (bytecode[target + 1] == move_dest) {
+            // Target instruction writes to move_dest — MOVE is dead
+            bytecode[i] = op_byte(Opcode::NOP);
+        }
     }
 
     // --- Pass 3: Compact — remove NOPs and fix all jump offsets ---
