@@ -64,3 +64,65 @@ TEST(lexer_booleans) {
     ASSERT_EQ(tokens[1].type, akar::TokenType::False);
     ASSERT_EQ(tokens[2].type, akar::TokenType::Nil);
 }
+
+// Test: Bitwise operator tokens (&, |, ^, ~, <<, >>)
+TEST(lexer_bitwise_operators) {
+    akar::Lexer lexer("& | ^ ~ << >>");
+    auto tokens = lexer.tokenize();
+    ASSERT_EQ(tokens[0].type, akar::TokenType::Amp);
+    ASSERT_EQ(tokens[1].type, akar::TokenType::Pipe);
+    ASSERT_EQ(tokens[2].type, akar::TokenType::Caret);
+    ASSERT_EQ(tokens[3].type, akar::TokenType::Tilde);
+    ASSERT_EQ(tokens[4].type, akar::TokenType::LessLess);
+    ASSERT_EQ(tokens[5].type, akar::TokenType::GreaterGreater);
+}
+
+// Test: New keywords (signal, effect, enum, switch, case, default, try, catch, throw)
+TEST(lexer_new_keywords) {
+    akar::Lexer lexer("signal effect enum switch case default try catch throw include await");
+    auto tokens = lexer.tokenize();
+    ASSERT_EQ(tokens[0].type, akar::TokenType::Signal);
+    ASSERT_EQ(tokens[1].type, akar::TokenType::Effect);
+    ASSERT_EQ(tokens[2].type, akar::TokenType::Enum);
+    ASSERT_EQ(tokens[3].type, akar::TokenType::Switch);
+    ASSERT_EQ(tokens[4].type, akar::TokenType::Case);
+    ASSERT_EQ(tokens[5].type, akar::TokenType::Default);
+    ASSERT_EQ(tokens[6].type, akar::TokenType::Try);
+    ASSERT_EQ(tokens[7].type, akar::TokenType::Catch);
+    ASSERT_EQ(tokens[8].type, akar::TokenType::Throw);
+    ASSERT_EQ(tokens[9].type, akar::TokenType::Include);
+    ASSERT_EQ(tokens[10].type, akar::TokenType::Await);
+}
+
+// Test: Mixed expression with bitwise operators
+TEST(lexer_bitwise_expression) {
+    akar::Lexer lexer("let x = (a & b) | (c ^ d)");
+    auto tokens = lexer.tokenize();
+    ASSERT_EQ(tokens[0].type, akar::TokenType::Let);
+    ASSERT_EQ(tokens[1].type, akar::TokenType::Identifier);
+    ASSERT_EQ(tokens[2].type, akar::TokenType::Equal);
+    ASSERT_EQ(tokens[3].type, akar::TokenType::LeftParen);
+    ASSERT_EQ(tokens[4].type, akar::TokenType::Identifier);
+    ASSERT_EQ(tokens[5].type, akar::TokenType::Amp);
+    ASSERT_EQ(tokens[6].type, akar::TokenType::Identifier);
+    ASSERT_EQ(tokens[7].type, akar::TokenType::RightParen);
+    ASSERT_EQ(tokens[8].type, akar::TokenType::Pipe);
+    ASSERT_EQ(tokens[9].type, akar::TokenType::LeftParen);
+    ASSERT_EQ(tokens[10].type, akar::TokenType::Identifier);
+    ASSERT_EQ(tokens[11].type, akar::TokenType::Caret);
+    ASSERT_EQ(tokens[12].type, akar::TokenType::Identifier);
+    ASSERT_EQ(tokens[13].type, akar::TokenType::RightParen);
+}
+
+// Test: Shift operators in expression
+TEST(lexer_shift_expression) {
+    akar::Lexer lexer("x << 2 >> 1");
+    auto tokens = lexer.tokenize();
+    ASSERT_EQ(tokens[0].type, akar::TokenType::Identifier);
+    ASSERT_EQ(tokens[1].type, akar::TokenType::LessLess);
+    ASSERT_EQ(tokens[2].type, akar::TokenType::Number);
+    ASSERT_EQ(tokens[2].number_value, 2.0);
+    ASSERT_EQ(tokens[3].type, akar::TokenType::GreaterGreater);
+    ASSERT_EQ(tokens[4].type, akar::TokenType::Number);
+    ASSERT_EQ(tokens[4].number_value, 1.0);
+}

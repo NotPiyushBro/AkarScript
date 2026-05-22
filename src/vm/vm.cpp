@@ -2637,6 +2637,49 @@ InterpretResult VM::run() {
                 if (offset < 0) { CHECK_MEMORY_LIMIT(); }
                 break;
             }
+            // Bitwise opcodes
+            case Opcode::BIT_AND: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) {
+                    S(wa) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) & static_cast<int64_t>(rc.get_number())));
+                } else { runtime_error("Operands must be numbers (bitwise AND)"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::BIT_OR: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) {
+                    S(wa) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) | static_cast<int64_t>(rc.get_number())));
+                } else { runtime_error("Operands must be numbers (bitwise OR)"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::BIT_XOR: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) {
+                    S(wa) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) ^ static_cast<int64_t>(rc.get_number())));
+                } else { runtime_error("Operands must be numbers (bitwise XOR)"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::BIT_NOT: {
+                Value& rb = S(wb);
+                if (rb.is_number()) {
+                    S(wa) = Value(static_cast<double>(~static_cast<int64_t>(rb.get_number())));
+                } else { runtime_error("Operand must be a number (bitwise NOT)"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::SHL: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) {
+                    S(wa) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) << static_cast<int64_t>(rc.get_number())));
+                } else { runtime_error("Operands must be numbers (shift left)"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::SHR: {
+                Value& rb = S(wb); Value& rc = S(wc);
+                if (rb.is_number() && rc.is_number()) {
+                    S(wa) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) >> static_cast<int64_t>(rc.get_number())));
+                } else { runtime_error("Operands must be numbers (shift right)"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
             default:
                 runtime_error("Opcode %d cannot be used with WIDE prefix", wide_op);
                 RETURN_RUNTIME_ERROR;

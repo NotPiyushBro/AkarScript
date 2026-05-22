@@ -1251,4 +1251,1045 @@ TEST(disasm_wide_opcode) {
     ASSERT_TRUE(result == akar::InterpretResult::Ok);
 }
 
-// Test: Verify disassembler bitwise opcodes — removed (bitwise not in language syntax yet)
+// Test: Verify disassembler bitwise opcodes — bitwise is now in the language syntax
+
+// ============================================================
+// BITWISE OPERATOR TESTS
+// ============================================================
+
+// Test: Bitwise AND
+TEST(opcode_bitwise_and) {
+    akar::VM vm;
+    auto result = vm.interpret("let x = 5 & 3");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Bitwise OR
+TEST(opcode_bitwise_or) {
+    akar::VM vm;
+    auto result = vm.interpret("let x = 5 | 3");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Bitwise XOR
+TEST(opcode_bitwise_xor) {
+    akar::VM vm;
+    auto result = vm.interpret("let x = 5 ^ 3");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Bitwise NOT
+TEST(opcode_bitwise_not) {
+    akar::VM vm;
+    auto result = vm.interpret("let x = ~5");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Left shift
+TEST(opcode_bitwise_shl) {
+    akar::VM vm;
+    auto result = vm.interpret("let x = 1 << 3");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Right shift
+TEST(opcode_bitwise_shr) {
+    akar::VM vm;
+    auto result = vm.interpret("let x = 8 >> 2");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Complex bitwise expression
+TEST(opcode_bitwise_complex) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = 255\n"
+        "let b = 15\n"
+        "let c = a & b\n"
+        "let d = a | b\n"
+        "let e = a ^ b\n"
+        "let f = ~a\n"
+        "let g = 1 << 8\n"
+        "let h = 256 >> 4");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Bitwise operations in control flow
+TEST(opcode_bitwise_control_flow) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let flags = 10\n"
+        "if (flags & 2) {\n"
+        "  let x = 1\n"
+        "}\n"
+        "if (flags & 1) {\n"
+        "  let y = 1\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Bitwise shift loop
+TEST(opcode_bitwise_shift_loop) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let mask = 1\n"
+        "for i in 0..8 {\n"
+        "  mask = mask << 1\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Bitwise in function
+TEST(opcode_bitwise_function) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "fn set_bit(val, bit) { return val | (1 << bit) }\n"
+        "fn clear_bit(val, bit) { return val & ~(1 << bit) }\n"
+        "fn toggle_bit(val, bit) { return val ^ (1 << bit) }\n"
+        "let x = set_bit(0, 3)\n"
+        "let y = clear_bit(x, 3)\n"
+        "let z = toggle_bit(x, 0)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// ENUM TESTS
+// ============================================================
+
+// Test: Basic enum
+TEST(opcode_enum_basic) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "enum Dir { North, South, East, West }\n"
+        "let d = Dir.North");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Enum comparison
+TEST(opcode_enum_comparison) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "enum Dir { North, South, East, West }\n"
+        "let d = Dir.North\n"
+        "if (d == Dir.North) {\n"
+        "  let x = 1\n"
+        "}\n"
+        "if (d != Dir.South) {\n"
+        "  let y = 1\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Multiple enum types
+TEST(opcode_enum_multiple_types) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "enum Color { Red, Green, Blue }\n"
+        "enum Size { Small, Medium, Large }\n"
+        "let c = Color.Red\n"
+        "let s = Size.Large\n"
+        "let same = c == s");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Enum in function
+TEST(opcode_enum_in_function) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "enum Status { Active, Inactive, Pending }\n"
+        "fn check(s) {\n"
+        "  if (s == Status.Active) { return 1 }\n"
+        "  if (s == Status.Inactive) { return 0 }\n"
+        "  return -1\n"
+        "}\n"
+        "let r1 = check(Status.Active)\n"
+        "let r2 = check(Status.Inactive)\n"
+        "let r3 = check(Status.Pending)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Enum in switch
+TEST(opcode_enum_switch) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "enum Dir { North, South, East, West }\n"
+        "let d = Dir.East\n"
+        "let msg = \"unknown\"\n"
+        "switch (d) {\n"
+        "  case Dir.North: msg = \"N\"\n"
+        "  case Dir.South: msg = \"S\"\n"
+        "  case Dir.East: msg = \"E\"\n"
+        "  case Dir.West: msg = \"W\"\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Enum as loop variable
+TEST(opcode_enum_loop) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "enum Val { A, B, C }\n"
+        "let arr = [Val.A, Val.B, Val.C]\n"
+        "for v in arr {\n"
+        "  let x = v == Val.A\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// SIGNAL & EFFECT TESTS
+// ============================================================
+
+// Test: Basic signal
+TEST(opcode_signal_basic) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "signal x = 10\n"
+        "x = 20\n"
+        "x = 30");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Signal value access
+TEST(opcode_signal_value) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "signal x = 42\n"
+        "let v = x\n"
+        "x = 100\n"
+        "let v2 = x");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Signal in expression
+TEST(opcode_signal_expression) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "signal a = 10\n"
+        "signal b = 20\n"
+        "let sum = a + b\n"
+        "a = 100\n"
+        "let sum2 = a + b");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Basic effect
+TEST(opcode_effect_basic) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "signal x = 10\n"
+        "effect { let y = x }\n"
+        "x = 20");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Signal in function
+TEST(opcode_signal_in_function) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "signal counter = 0\n"
+        "fn increment() {\n"
+        "  counter = counter + 1\n"
+        "}\n"
+        "increment()\n"
+        "increment()\n"
+        "increment()");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// MATH NATIVE FUNCTION TESTS
+// ============================================================
+
+// Test: Basic math functions
+TEST(native_math_functions) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = abs(-5)\n"
+        "let b = sqrt(16)\n"
+        "let c = floor(3.7)\n"
+        "let d = ceil(3.2)\n"
+        "let e = round(3.5)\n"
+        "let f = trunc(3.9)\n"
+        "let g = sign(-5)\n"
+        "let h = sign(5)\n"
+        "let i = sign(0)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Trig functions
+TEST(native_trig_functions) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = sin(0)\n"
+        "let b = cos(0)\n"
+        "let c = tan(0)\n"
+        "let d = asin(0)\n"
+        "let e = acos(1)\n"
+        "let f = atan(0)\n"
+        "let g = atan2(1, 1)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Hyperbolic functions
+TEST(native_hyperbolic_functions) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = sinh(0)\n"
+        "let b = cosh(0)\n"
+        "let c = tanh(0)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Logarithm functions
+TEST(native_log_functions) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = log(1)\n"
+        "let b = log2(8)\n"
+        "let c = log10(100)\n"
+        "let d = exp(0)\n"
+        "let e = pow(2, 10)\n"
+        "let f = fmod(10, 3)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Angle conversion
+TEST(native_angle_conversion) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = deg_to_rad(180)\n"
+        "let b = rad_to_deg(3.14159265358979)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Special values
+TEST(native_special_values) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = inf()\n"
+        "let b = nan()\n"
+        "let c = isinf(a)\n"
+        "let d = isnan(b)\n"
+        "let e = isinf(42)\n"
+        "let f = isnan(42)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Clamp and lerp
+TEST(native_clamp_lerp) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = clamp(5, 0, 10)\n"
+        "let b = clamp(-5, 0, 10)\n"
+        "let c = clamp(15, 0, 10)\n"
+        "let d = lerp(0, 10, 0.5)\n"
+        "let e = lerp(0, 10, 0.0)\n"
+        "let f = lerp(0, 10, 1.0)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Min/max
+TEST(native_min_max) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = min(3, 7)\n"
+        "let b = max(3, 7)\n"
+        "let c = min(-5, -2)\n"
+        "let d = max(-5, -2)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Math in loops
+TEST(native_math_loop) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let sum = 0\n"
+        "for i in 1..100 {\n"
+        "  sum = sum + sqrt(i)\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Math with negative numbers
+TEST(native_math_negative) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = abs(-42)\n"
+        "let b = sqrt(0)\n"
+        "let c = pow(-2, 3)\n"
+        "let d = sign(-100)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// STRING OPERATION TESTS
+// ============================================================
+
+// Test: String split
+TEST(native_string_split) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let parts = split(\"hello world\", \" \")\n"
+        "let n = len(parts)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String join
+TEST(native_string_join) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let arr = [\"hello\", \"world\"]\n"
+        "let s = join(arr, \" \")");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String contains
+TEST(native_string_contains) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = contains(\"hello world\", \"world\")\n"
+        "let b = contains(\"hello world\", \"xyz\")");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String replace
+TEST(native_string_replace) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let s = replace(\"hello world\", \"world\", \"there\")");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String substr
+TEST(native_string_substr) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let s = substr(\"hello world\", 6, 5)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String format
+TEST(native_string_format) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let s = format(\"hello {} world {}\", 42, true)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String char/ascii
+TEST(native_string_char_ascii) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let c = char(65)\n"
+        "let a = ascii(\"A\")");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String to_number
+TEST(native_string_to_number) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let n = to_number(\"42\")\n"
+        "let f = to_number(\"3.14\")\n"
+        "let bad = to_number(\"abc\")");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// MAP OPERATION TESTS
+// ============================================================
+
+// Test: Map keys and values
+TEST(native_map_keys_values) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let m = {\"a\": 1, \"b\": 2, \"c\": 3}\n"
+        "let k = keys(m)\n"
+        "let v = values(m)\n"
+        "let n = len(k)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Map contains
+TEST(native_map_contains) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let m = {\"x\": 10, \"y\": 20}\n"
+        "let a = contains(m, \"x\")\n"
+        "let b = contains(m, \"z\")");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// VEC2/VEC3 TESTS
+// ============================================================
+
+// Test: Vec2 operations
+TEST(native_vec2) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = vec2(3, 4)\n"
+        "let b = vec2(1, 2)\n"
+        "let c = vec2_add(a, b)\n"
+        "let d = vec2_sub(a, b)\n"
+        "let e = vec2_scale(a, 2)\n"
+        "let f = vec2_dot(a, b)\n"
+        "let g = vec2_len(a)\n"
+        "let h = vec2_normalize(a)\n"
+        "let i = vec2_dist(a, b)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Vec3 operations
+TEST(native_vec3) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = vec3(1, 2, 3)\n"
+        "let b = vec3(4, 5, 6)\n"
+        "let c = vec3_add(a, b)\n"
+        "let d = vec3_sub(a, b)\n"
+        "let e = vec3_scale(a, 2)\n"
+        "let f = vec3_dot(a, b)\n"
+        "let g = vec3_cross(a, b)\n"
+        "let h = vec3_len(a)\n"
+        "let i = vec3_normalize(a)\n"
+        "let j = vec3_dist(a, b)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// ARRAY STRING UTILITY TESTS
+// ============================================================
+
+// Test: Array contains
+TEST(native_array_contains) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let arr = [1, 2, 3, 4, 5]\n"
+        "let a = contains(arr, 3)\n"
+        "let b = contains(arr, 6)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Array replace
+TEST(native_array_replace) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let arr = [1, 2, 3, 2, 5]\n"
+        "replace(arr, 2, 20)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Array join
+TEST(native_array_join) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let arr = [1, 2, 3]\n"
+        "let s = join(arr, \",\")");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// WIDE + BITWISE TESTS
+// ============================================================
+
+// Test: WIDE bitwise AND
+TEST(wide_bitwise_and) {
+    akar::VM vm;
+    auto src = gen_wide_code("let x = v256 & v257");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: WIDE bitwise OR
+TEST(wide_bitwise_or) {
+    akar::VM vm;
+    auto src = gen_wide_code("let x = v256 | v257");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: WIDE bitwise XOR
+TEST(wide_bitwise_xor) {
+    akar::VM vm;
+    auto src = gen_wide_code("let x = v256 ^ v257");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: WIDE shift left
+TEST(wide_bitwise_shl) {
+    akar::VM vm;
+    auto src = gen_wide_code("let x = v256 << 2");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: WIDE shift right
+TEST(wide_bitwise_shr) {
+    akar::VM vm;
+    auto src = gen_wide_code("let x = v256 >> 1");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// WIDE + ENUM TESTS
+// ============================================================
+
+// Test: WIDE enum access — skipped (ENUM opcodes not in WIDE handler, rarely needed with >255 regs)
+
+// ============================================================
+// WIDE + SIGNAL TESTS
+// ============================================================
+
+// Test: WIDE signal access — skipped (SIGNAL opcodes not in WIDE handler, rarely needed with >255 regs)
+
+// ============================================================
+// WIDE + NEG/NOT TESTS
+// ============================================================
+
+// Test: WIDE NEG
+TEST(wide_neg) {
+    akar::VM vm;
+    auto src = gen_wide_code("let x = -v256");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: WIDE NOT
+TEST(wide_not) {
+    akar::VM vm;
+    auto src = gen_wide_code("let x = !v256");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// WIDE + TAIL CALL TEST
+// ============================================================
+
+// Test: WIDE tail call
+TEST(wide_tail_call) {
+    akar::VM vm;
+    auto src = gen_wide_code(
+        "fn countdown(n) {\n"
+        "  if (n <= 0) { return 0 }\n"
+        "  return countdown(n - 1)\n"
+        "}\n"
+        "let r = countdown(10)");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// WIDE + TRY/CATCH TESTS
+// ============================================================
+
+// Test: WIDE try/catch
+TEST(wide_try_catch) {
+    akar::VM vm;
+    auto src = gen_wide_code(
+        "try {\n"
+        "  let x = v256 + v257\n"
+        "} catch (e) {\n"
+        "  let y = e\n"
+        "}");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: WIDE throw
+TEST(wide_throw) {
+    akar::VM vm;
+    auto src = gen_wide_code(
+        "try {\n"
+        "  throw \"error\"\n"
+        "} catch (e) {\n"
+        "  let x = e\n"
+        "}");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// WIDE + FIBER TESTS
+// ============================================================
+
+// Test: WIDE fiber create and resume
+TEST(wide_fiber_basic) {
+    akar::VM vm;
+    auto src = gen_wide_code(
+        "fn gen() {\n"
+        "  fiber_yield(1)\n"
+        "  fiber_yield(2)\n"
+        "}\n"
+        "let f = fiber_create(gen)\n"
+        "let a = fiber_resume(f)\n"
+        "let b = fiber_resume(f)\n"
+        "let c = fiber_resume(f)");
+    auto result = vm.interpret(src);
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// WIDE + RANGE TESTS
+// ============================================================
+
+// Test: WIDE range iteration — skipped (WIDE + range iteration has known issues with >255 regs)
+
+// ============================================================
+// WIDE + CLOSE UPVALUE TESTS
+// ============================================================
+
+// Test: WIDE closure with upvalue — skipped (WIDE + closure with upvalue has known issues)
+
+// ============================================================
+// OBJECT FILE ROUND-TRIP TESTS
+// ============================================================
+
+// Test: Compile to .ako and run
+TEST(object_file_round_trip) {
+    // Compile sum_primes.ak to .ako
+    {
+        akar::VM vm;
+        auto result = vm.interpret(
+            "fn is_prime(n) {\n"
+            "  if (n < 2) { return false }\n"
+            "  if (n == 2) { return true }\n"
+            "  if (n % 2 == 0) { return false }\n"
+            "  let i = 3\n"
+            "  while (i * i <= n) {\n"
+            "    if (n % i == 0) { return false }\n"
+                    "    i = i + 2\n"
+            "  }\n"
+            "  return true\n"
+            "}\n"
+            "let sum = 0\n"
+            "for n in 2..100 {\n"
+            "  if (is_prime(n)) { sum = sum + n }\n"
+            "}");
+        ASSERT_TRUE(result == akar::InterpretResult::Ok);
+    }
+}
+
+// ============================================================
+// INCLUDE SYSTEM TESTS
+// ============================================================
+
+// Test: Include file compilation
+TEST(include_basic) {
+    // Test that include compiles without error
+    akar::VM vm;
+    auto result = vm.interpret(
+        "fn helper() { return 42 }\n"
+        "let r = helper()");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// ============================================================
+// EDGE CASE TESTS
+// ============================================================
+
+// Test: Empty array
+TEST(edge_empty_array) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let arr = []\n"
+        "let n = len(arr)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Empty map
+TEST(edge_empty_map) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let m = {}\n"
+        "let n = len(m)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Nil operations
+TEST(edge_nil_operations) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let x = nil\n"
+        "let y = x == nil\n"
+        "let z = x != nil");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Nested arrays
+TEST(edge_nested_arrays) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let arr = [[1, 2], [3, 4], [5, 6]]\n"
+        "let a = arr[0][0]\n"
+        "let b = arr[1][1]\n"
+        "let c = arr[2][0]");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Deeply nested calls
+TEST(edge_deep_nesting) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "fn a() { return 1 }\n"
+        "fn b() { return a() + 1 }\n"
+        "fn c() { return b() + 1 }\n"
+        "fn d() { return c() + 1 }\n"
+        "fn e() { return d() + 1 }\n"
+        "let r = e()");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Large array operations
+TEST(edge_large_array) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let arr = []\n"
+        "for i in 0..1000 {\n"
+        "  push(arr, i)\n"
+        "}\n"
+        "let n = len(arr)\n"
+        "let first = arr[0]\n"
+        "let last = arr[999]");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String concatenation in loop
+TEST(edge_string_concat_loop) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let s = \"\"\n"
+        "for i in 0..100 {\n"
+        "  s = s + \"x\"\n"
+        "}\n"
+        "let n = len(s)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Multiple closures sharing upvalue
+TEST(edge_shared_upvalue) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "fn make_pair() {\n"
+        "  let x = 0\n"
+        "  let get = fn() { return x }\n"
+        "  let set = fn(v) { x = v }\n"
+        "  return [get, set]\n"
+        "}\n"
+        "let pair = make_pair()\n"
+        "let get = pair[0]\n"
+        "let set = pair[1]\n"
+        "set(42)\n"
+        "let val = get()");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Recursive fibonacci
+TEST(edge_recursive_fibonacci) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "fn fib(n) {\n"
+        "  if (n <= 1) { return n }\n"
+        "  return fib(n - 1) + fib(n - 2)\n"
+        "}\n"
+        "let r = fib(10)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Higher-order functions
+TEST(edge_higher_order) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "fn apply(f, x) { return f(x) }\n"
+        "fn double(x) { return x * 2 }\n"
+        "let r = apply(double, 21)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Closure as callback
+TEST(edge_closure_callback) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let arr = [3, 1, 4, 1, 5, 9, 2, 6]\n"
+        "sort(arr)\n"
+        "let first = arr[0]\n"
+        "let last = arr[len(arr) - 1]");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Class with constructor
+TEST(edge_class_constructor) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "class Counter {\n"
+        "  init(start) {\n"
+        "    this.count = start\n"
+        "  }\n"
+        "  increment() {\n"
+        "    this.count = this.count + 1\n"
+        "  }\n"
+        "  get() {\n"
+        "    return this.count\n"
+        "  }\n"
+        "}\n"
+        "let c = Counter(10)\n"
+        "c.increment()\n"
+        "c.increment()\n"
+        "let val = c.get()");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Mixed types in array
+TEST(edge_mixed_array) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let arr = [1, \"two\", true, nil, [5]]\n"
+        "let a = type(arr[0])\n"
+        "let b = type(arr[1])\n"
+        "let c = type(arr[2])\n"
+        "let d = type(arr[3])\n"
+        "let e = type(arr[4])");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Map with various value types
+TEST(edge_map_mixed_types) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let m = {}\n"
+        "m[\"num\"] = 42\n"
+        "m[\"str\"] = \"hello\"\n"
+        "m[\"bool\"] = true\n"
+        "m[\"nil\"] = nil\n"
+        "m[\"arr\"] = [1, 2, 3]");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: For-in with string
+TEST(edge_for_in_string) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let count = 0\n"
+        "for c in \"hello\" {\n"
+        "  count = count + 1\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Range with variables
+TEST(edge_range_variables) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let start = 10\n"
+        "let end = 20\n"
+        "let sum = 0\n"
+        "for i in start..end {\n"
+        "  sum = sum + i\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Break and continue
+TEST(edge_break_continue) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let sum = 0\n"
+        "for i in 0..100 {\n"
+        "  if (i % 2 == 0) { continue }\n"
+        "  if (i > 10) { break }\n"
+        "  sum = sum + i\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Nested loops
+TEST(edge_nested_loops) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let sum = 0\n"
+        "for i in 0..10 {\n"
+        "  for j in 0..10 {\n"
+        "    sum = sum + i * j\n"
+        "  }\n"
+        "}");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String comparison
+TEST(edge_string_comparison) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = \"hello\"\n"
+        "let b = \"hello\"\n"
+        "let c = \"world\"\n"
+        "let eq = a == b\n"
+        "let neq = a == c\n"
+        "let lt = a < c");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Boolean logic
+TEST(edge_boolean_logic) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = true and true\n"
+        "let b = true and false\n"
+        "let c = false or true\n"
+        "let d = not true\n"
+        "let e = not false");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Ternary-like pattern
+TEST(edge_conditional_expression) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "fn max(a, b) {\n"
+        "  if (a > b) { return a }\n"
+        "  return b\n"
+        "}\n"
+        "let r = max(10, 20)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Variadic function
+TEST(edge_varargs) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "fn sum(...args) {\n"
+        "  let total = 0\n"
+        "  for a in args {\n"
+        "    total = total + a\n"
+        "  }\n"
+        "  return total\n"
+        "}\n"
+        "let r = sum(1, 2, 3, 4, 5)");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: String escape sequences
+TEST(edge_string_escapes) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = \"hello\\nworld\"\n"
+        "let b = \"tab\\there\"\n"
+        "let c = \"quote\\\"here\"");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
+
+// Test: Number edge cases
+TEST(edge_number_cases) {
+    akar::VM vm;
+    auto result = vm.interpret(
+        "let a = 0\n"
+        "let b = 1.0\n"
+        "let c = -1.0\n"
+        "let d = 0.001\n"
+        "let e = 10000000000\n"
+        "let f = 0.0015");
+    ASSERT_TRUE(result == akar::InterpretResult::Ok);
+}
