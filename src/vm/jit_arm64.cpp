@@ -233,6 +233,27 @@ public:
         emit32(0x93407C00u | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
     }
 
+    void emit_asr_imm(int dest, int src, int shift) override {
+        // SBFM Xd, Xn, #shift, #63 = ASR Xd, Xn, #shift
+        emit32(0x9340FC00u | (((shift) & 0x3Fu) << 16) | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
+    void emit_mul(int dest, int src1, int src2) override {
+        // MUL Xd, Xn, Xm = MADD Xd, Xn, Xm, XZR
+        emit32(0x9B007C00u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
+    void emit_sdiv(int dest, int src1, int src2) override {
+        // SDIV Xd, Xn, Xm
+        emit32(0x9AC00C00u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
+    void emit_msub(int dest, int src1, int src2, int src3) override {
+        // MSUB Xd, Xn, Xm, Xa → Rd = Ra - Rn * Rm
+        // Here: dest = src3 - src1 * src2
+        emit32(0x9B000200u | ((src2 & 0x1Fu) << 16) | ((src3 & 0x1Fu) << 10) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
     void emit_fadd(int d, int s1, int s2) override { emit32(enc_fadd(d, s1, s2)); }
     void emit_fsub(int d, int s1, int s2) override { emit32(enc_fsub(d, s1, s2)); }
     void emit_fmul(int d, int s1, int s2) override { emit32(enc_fmul(d, s1, s2)); }

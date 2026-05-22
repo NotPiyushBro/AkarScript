@@ -396,8 +396,7 @@ bool Value::is_truthy() const {
     if (is_nil()) return false;
     if (is_bool()) return get_bool();
     if (is_number()) {
-        double d;
-        std::memcpy(&d, &bits, 8);
+        double d = get_number();
         return d != 0 && !std::isnan(d);
     }
     // Enum values are always truthy (they are non-nil, non-zero)
@@ -410,12 +409,9 @@ bool Value::operator==(const Value& other) const {
     if (bits == other.bits) {
         return true;
     }
-    // Both numbers: compare as doubles
+    // Both numbers: compare as doubles (handles small int vs double comparison)
     if (is_number() && other.is_number()) {
-        double a, b;
-        std::memcpy(&a, &bits, 8);
-        std::memcpy(&b, &other.bits, 8);
-        return a == b;
+        return get_number() == other.get_number();
     }
     // Both strings: compare contents
     if (is_string() && other.is_string()) {
@@ -430,8 +426,7 @@ std::string Value::to_string() const {
     if (is_nil()) return "nil";
     if (is_bool()) return get_bool() ? "true" : "false";
     if (is_number()) {
-        double d;
-        std::memcpy(&d, &bits, 8);
+        double d = get_number();
         if (std::floor(d) == d && std::abs(d) < 1e16) {
             return std::to_string(static_cast<int64_t>(d));
         }

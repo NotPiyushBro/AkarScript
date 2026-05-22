@@ -39,3 +39,6 @@ AGENTS.md
 debug.log
 luac.out
 sum_primes.lua
+
+# Temporary files
+temp/

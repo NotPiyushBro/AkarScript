@@ -67,12 +67,28 @@ struct Value {
     static constexpr uint64_t PTR_TAG   = 0x0008000000000000ULL;
     static constexpr uint64_t PTR_MASK  = 0x0000FFFFFFFFFFFFULL; // lower 48 bits
     static constexpr uint64_t SIGN_BIT  = 0x8000000000000000ULL; // bit 63 for kernel pointers
+    // Small int tag: NaN-boxed 48-bit signed integer
+    // Upper 16 bits = 0xFFF7 (NaN exponent, not a pointer, not nil/bool/enum)
+    // Lower 48 bits = signed integer value (two's complement)
+    static constexpr uint64_t SMALLINT_TAG  = 0xFFF7000000000000ULL;
+    static constexpr uint64_t SMALLINT_MASK = 0x0000FFFFFFFFFFFFULL; // lower 48 bits
+
+    // Small int constructor (NaN-boxed 48-bit signed integer)
+    static Value from_int(int64_t v) {
+        Value val;
+        val.bits = SMALLINT_TAG | (static_cast<uint64_t>(v) & SMALLINT_MASK);
+        return val;
+    }
 
     // Constructors
     Value() : bits(NIL_VAL) {}
     Value(bool b) : bits(b ? TRUE_VAL : FALSE_VAL) {}
     Value(double n) {
-        if (std::isnan(n)) {
+        // Auto-convert integer doubles to small ints for better JIT performance
+        if (n == static_cast<double>(static_cast<int64_t>(n)) &&
+            std::abs(n) < static_cast<double>(1LL << 47)) {
+            bits = SMALLINT_TAG | (static_cast<uint64_t>(static_cast<int64_t>(n)) & SMALLINT_MASK);
+        } else if (std::isnan(n)) {
             bits = NAN_BASE; // canonical NaN (not a tagged value)
         } else {
             std::memcpy(&bits, &n, 8);
@@ -92,9 +108,10 @@ struct Value {
     // Type checks
     bool is_nil() const { return bits == NIL_VAL; }
     bool is_bool() const { return bits == FALSE_VAL || bits == TRUE_VAL; }
-    bool is_number() const { return (bits & NAN_BASE) != NAN_BASE; }
+    bool is_smallint() const { return (bits & 0xFFFF000000000000ULL) == SMALLINT_TAG; }
+    bool is_number() const { return (bits & NAN_BASE) != NAN_BASE || is_smallint(); }
     // Enum tag: 0xFFFA in upper 16 bits
-    bool is_obj() const { return (bits & NAN_BASE) == NAN_BASE && bits != NAN_BASE && !is_nil() && !is_bool() && (bits & 0xFFFF000000000000ULL) != 0xFFFA000000000000ULL; }
+    bool is_obj() const { return (bits & NAN_BASE) == NAN_BASE && bits != NAN_BASE && !is_nil() && !is_bool() && !is_smallint() && (bits & 0xFFFF000000000000ULL) != 0xFFFA000000000000ULL; }
     bool is_string() const;
     bool is_array() const;
     bool is_map() const;
@@ -111,7 +128,18 @@ struct Value {
     // Accessors
     bool get_bool() const { return bits == TRUE_VAL; }
 
+    // Extract 48-bit signed integer from NaN-boxed small int
+    int64_t get_int() const {
+        uint64_t raw = bits & SMALLINT_MASK;
+        // Sign-extend from 48 bits
+        if (raw & 0x0000800000000000ULL) raw |= ~SMALLINT_MASK;
+        return static_cast<int64_t>(raw);
+    }
+
     double get_number() const {
+        if (is_smallint()) {
+            return static_cast<double>(get_int());
+        }
         double d;
         std::memcpy(&d, &bits, 8);
         return d;

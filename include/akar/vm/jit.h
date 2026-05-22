@@ -90,6 +90,14 @@ public:
     virtual void emit_lsr(int dest, int src, int shift) = 0;
     virtual void emit_mvn(int dest, int src) = 0;
     virtual void emit_sxtw(int dest, int src) = 0;
+    // Arithmetic shift right by immediate (sign-extending)
+    virtual void emit_asr_imm(int dest, int src, int shift) = 0;
+    // 64-bit integer multiply: dest = src1 * src2
+    virtual void emit_mul(int dest, int src1, int src2) = 0;
+    // Signed integer divide: dest = src1 / src2
+    virtual void emit_sdiv(int dest, int src1, int src2) = 0;
+    // Multiply-subtract: dest = src3 - src1 * src2
+    virtual void emit_msub(int dest, int src1, int src2, int src3) = 0;
 
     // --- FP Arithmetic ---
     virtual void emit_fadd(int dest, int src1, int src2) = 0;
