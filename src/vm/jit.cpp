@@ -37,14 +37,17 @@ static VM* g_jit_vm = nullptr;
 
 void jit_set_vm(VM* vm) { g_jit_vm = vm; }
 
-// Helper: perform a function call from JIT code through the VM
+// Helper: perform a function call from JIT code
+// Uses VM::jit_call_direct which avoids vector allocation and calls
+// JIT'd functions directly (native→native).
+// Returns NaN-boxed bits of result.
 static int64_t jit_call_helper(Value* callee_slot, int arg_count) {
     Value callee = *callee_slot;
     if (!callee.is_closure()) return NIL_BITS;
     if (!g_jit_vm) return NIL_BITS;
     ObjClosure* closure = callee.as_closure();
-    std::vector<Value> args(callee_slot + 1, callee_slot + 1 + arg_count);
-    Value result = g_jit_vm->call_function(closure, args);
+    Value* args = callee_slot + 1; // args are right after callee on stack
+    Value result = g_jit_vm->jit_call_direct(closure, args, arg_count);
     *callee_slot = result;
     uint64_t bits;
     std::memcpy(&bits, &result, 8);
@@ -367,22 +370,10 @@ bool JITCompiler::compile_instruction(int& pc) {
 
     #undef EMIT_FUSED_CMP_BRANCH
 
-    // --- Call: invoke function through VM helper ---
-    case Opcode::CALL: {
-        // CALL R_a, arg_count=R_b8
-        int offset_a = a * 8;  // byte offset from R_BASE for stack[base + a]
-        // Compute callee_slot = &stack[base + a] = R_BASE + a*8
-        b->emit_load_imm64(R1, static_cast<uint64_t>(offset_a));
-        b->emit_add(R1, R1, b->reg_base());  // R1 = callee_slot
-        // ARM64 calling convention: X0 = callee_slot, X1 = arg_count
-        b->emit_mov(0, R1);                   // X0 = callee_slot
-        b->emit_load_imm64(1, static_cast<uint64_t>(b8)); // X1 = arg_count
-        // Call the helper (returns NaN-boxed result in X0)
-        b->emit_call_indirect(reinterpret_cast<void*>(&jit_call_helper));
-        // Store result at stack[base + a]
-        b->emit_store_int(0, b->reg_base(), offset_a);
-        break;
-    }
+    // --- Call: bail to interpreter (C function call overhead kills perf) ---
+    case Opcode::CALL:
+        emit_bailout(start_pc);
+        return false;
 
     // --- Return: store result at stack[callee_pos], return Done ---
     case Opcode::RETURN: {

@@ -2812,6 +2812,69 @@ Value VM::call_function(ObjClosure* closure, const std::vector<Value>& args) {
     return ret;
 }
 
+// Direct JIT call: args are already on the stack at `args` pointer.
+// Avoids vector allocation. Calls JIT'd functions directly if available.
+Value VM::jit_call_direct(ObjClosure* closure, Value* args, int arg_count) {
+    ObjFunction* func = closure->function;
+
+    // Check if function has JIT code — call directly
+    auto jit_it = jit_cache_.compiled.find(func);
+    if (jit_it != jit_cache_.compiled.end()) {
+        int callee_abs = static_cast<int>(args - stack_) - 1; // closure is at args-1
+        int args_abs = callee_abs + 1;
+
+        // Set up call frame
+        if (frame_count_ >= MAX_FRAMES) return Value();
+        CallFrame* new_frame = &frames_[frame_count_++];
+        new_frame->closure = closure;
+        new_frame->ip = func->bytecode.data();
+        new_frame->base_register = args_abs;
+        new_frame->return_register = 0;
+        new_frame->callee_stack_pos = callee_abs;
+        new_frame->caller_stack_top = stack_top_;
+        new_frame->slots = &stack_[args_abs];
+
+        // Init unused registers to nil
+        static constexpr uint64_t NIL_B = 0x7FFC000000000000ULL;
+        int needed = func->register_count;
+        for (int i = arg_count; i < needed; i++) {
+            stack_[args_abs + i].bits = NIL_B;
+        }
+        int new_top = args_abs + needed;
+        if (new_top > stack_top_) stack_top_ = new_top;
+
+        // Call JIT code directly
+        int jit_pc = 0;
+        JITResult result = jit_it->second->entry(stack_, args_abs, &jit_pc,
+                                                   func->constants.data(),
+                                                   callee_abs, stack_top_);
+        // Pop frame
+        frame_count_--;
+        stack_top_ = std::max(stack_top_, callee_abs + 1);
+
+        // Return result from stack[callee_abs]
+        return stack_[callee_abs];
+    }
+
+    // No JIT code — fall back to interpreter via call_function
+    // Copy args to a temporary on the stack (no heap alloc)
+    int saved_top = stack_top_;
+    int callee_abs = stack_top_;
+    stack_[stack_top_++] = Value(static_cast<Obj*>(closure));
+    for (int i = 0; i < arg_count; i++) {
+        stack_[stack_top_++] = args[i];
+    }
+
+    if (!call(closure, arg_count, 0, callee_abs)) {
+        stack_top_ = saved_top;
+        return Value();
+    }
+    auto result = run();
+    Value ret = (result == InterpretResult::Ok) ? stack_[stack_top_ - 1] : Value();
+    stack_top_ = saved_top;
+    return ret;
+}
+
 bool VM::call(ObjClosure* closure, int arg_count, int return_reg, int callee_abs) {
     if (frame_count_ >= MAX_FRAMES) {
         runtime_error("Stack overflow");

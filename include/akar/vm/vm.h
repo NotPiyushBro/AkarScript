@@ -158,9 +158,13 @@ private:
 
     std::string last_error_;
 
+public:
     // JIT compiler
     JITCache jit_cache_;
     bool jit_enabled_ = true;
+
+    // Direct JIT call from JIT helper (avoids vector allocation)
+    Value jit_call_direct(ObjClosure* closure, Value* args, int arg_count);
 
     // VM registration for GC (tracks all live VMs so GC marks from all roots)
     static std::unordered_set<VM*> active_vms_;
