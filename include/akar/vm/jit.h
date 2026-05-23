@@ -225,6 +225,10 @@ private:
 
     // Fix up all pending jumps
     void fixup_jumps();
+
+    // Type specialization: fast path mode (no guard checks)
+    bool fast_path_ = false;
+    bool is_integer_function() const;
 };
 
 // ============================================================

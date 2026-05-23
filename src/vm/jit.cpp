@@ -592,89 +592,104 @@ bool JITCompiler::compile_instruction(int& pc) {
         invalidate_fp_cache();
         b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
         b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
-        // Small int guard
-        b->emit_lsr_imm(2, R0, 48);
-        b->emit_load_imm64(3, 0xFFF7);
-        b->emit_cmp(2, 3);
-        size_t add_smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0);
-        b->emit_lsr_imm(2, R1, 48);
-        b->emit_cmp(2, 3);
-        size_t add_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
-        // Fast path: add raw tagged values, mask to 48 bits, re-tag
-        // The tag bits (0xFFF7) cancel/add harmlessly since we mask below
-        b->emit_add(4, R0, R1);
-        b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
-        b->emit_orr(4, 4, 26);  // X26 = cached SMALLINT_TAG
-        b->emit_store_int(4, b->reg_base(), slot_offset(a));
-        size_t add_smi_done = b->emit_branch(0);
-        b->patch_branch(add_smi_bail_a, b->code_size());
-        b->patch_branch(add_smi_bail_b, b->code_size());
-        b->emit_fmov_from_int(D0, R0);
-        b->emit_fmov_from_int(D1, R1);
-        b->emit_fadd(D0, D0, D1);
-        b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
-        b->patch_branch(add_smi_done, b->code_size());
+        if (fast_path_) {
+            // Type-specialized: skip guards, assume small int
+            b->emit_add(4, R0, R1);
+            b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
+            b->emit_orr(4, 4, 26);
+            b->emit_store_int(4, b->reg_base(), slot_offset(a));
+        } else {
+            // Small int guard
+            b->emit_lsr_imm(2, R0, 48);
+            b->emit_load_imm64(3, 0xFFF7);
+            b->emit_cmp(2, 3);
+            size_t add_smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0);
+            b->emit_lsr_imm(2, R1, 48);
+            b->emit_cmp(2, 3);
+            size_t add_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
+            // Fast path: add raw tagged values, mask to 48 bits, re-tag
+            b->emit_add(4, R0, R1);
+            b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
+            b->emit_orr(4, 4, 26);
+            b->emit_store_int(4, b->reg_base(), slot_offset(a));
+            size_t add_smi_done = b->emit_branch(0);
+            b->patch_branch(add_smi_bail_a, b->code_size());
+            b->patch_branch(add_smi_bail_b, b->code_size());
+            b->emit_fmov_from_int(D0, R0);
+            b->emit_fmov_from_int(D1, R1);
+            b->emit_fadd(D0, D0, D1);
+            b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
+            b->patch_branch(add_smi_done, b->code_size());
+        }
         break;
     }
     case Opcode::SUB_NUM: {
         invalidate_fp_cache();
         b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
         b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
-        b->emit_lsr_imm(2, R0, 48);
-        b->emit_load_imm64(3, 0xFFF7);
-        b->emit_cmp(2, 3);
-        size_t sub_smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0);
-        b->emit_lsr_imm(2, R1, 48);
-        b->emit_cmp(2, 3);
-        size_t sub_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
-        // Fast path: subtract raw tagged values, mask to 48 bits, re-tag
-        b->emit_sub(4, R0, R1);
-        b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
-        b->emit_orr(4, 4, 26);  // X26 = cached SMALLINT_TAG
-        b->emit_store_int(4, b->reg_base(), slot_offset(a));
-        size_t sub_smi_done = b->emit_branch(0);
-        b->patch_branch(sub_smi_bail_a, b->code_size());
-        b->patch_branch(sub_smi_bail_b, b->code_size());
-        b->emit_fmov_from_int(D0, R0);
-        b->emit_fmov_from_int(D1, R1);
-        b->emit_fsub(D0, D0, D1);
-        b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
-        b->patch_branch(sub_smi_done, b->code_size());
+        if (fast_path_) {
+            b->emit_sub(4, R0, R1);
+            b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
+            b->emit_orr(4, 4, 26);
+            b->emit_store_int(4, b->reg_base(), slot_offset(a));
+        } else {
+            b->emit_lsr_imm(2, R0, 48);
+            b->emit_load_imm64(3, 0xFFF7);
+            b->emit_cmp(2, 3);
+            size_t sub_smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0);
+            b->emit_lsr_imm(2, R1, 48);
+            b->emit_cmp(2, 3);
+            size_t sub_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
+            b->emit_sub(4, R0, R1);
+            b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
+            b->emit_orr(4, 4, 26);
+            b->emit_store_int(4, b->reg_base(), slot_offset(a));
+            size_t sub_smi_done = b->emit_branch(0);
+            b->patch_branch(sub_smi_bail_a, b->code_size());
+            b->patch_branch(sub_smi_bail_b, b->code_size());
+            b->emit_fmov_from_int(D0, R0);
+            b->emit_fmov_from_int(D1, R1);
+            b->emit_fsub(D0, D0, D1);
+            b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
+            b->patch_branch(sub_smi_done, b->code_size());
+        }
         break;
     }
     case Opcode::MUL_NUM: {
         invalidate_fp_cache();
-        // Load operands as raw NaN-boxed bits
         b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
         if (b8 != c8) {
             b->emit_load_int(R1, b->reg_base(), slot_offset(c8));
         } else {
             b->emit_mov(R1, R0);
         }
-        // Small int guard: upper 16 bits must == 0xFFF7
-        b->emit_lsr_imm(2, R0, 48);
-        b->emit_load_imm64(3, 0xFFF7);
-        b->emit_cmp(2, 3);
-        size_t mul_smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0);
-        b->emit_lsr_imm(2, R1, 48);
-        b->emit_cmp(2, 3);
-        size_t mul_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
-        // Both small ints: multiply raw tagged values, mask to 48 bits, re-tag
-        // Lower 48 bits of (TAG|a)*(TAG|b) = a*b (tag bits contribute only to upper bits)
-        b->emit_mul(4, R0, R1);                                  // X4 = a * b (raw)
-        b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);        // mask 48 bits
-        b->emit_orr(4, 4, 26);                                  // X26 = cached SMALLINT_TAG
-        b->emit_store_int(4, b->reg_base(), slot_offset(a));
-        size_t mul_smi_done = b->emit_branch(0);
-        // FP fallback
-        b->patch_branch(mul_smi_bail_a, b->code_size());
-        b->patch_branch(mul_smi_bail_b, b->code_size());
-        b->emit_fmov_from_int(D0, R0);
-        b->emit_fmov_from_int(D1, R1);
-        b->emit_fmul(D0, D0, D1);
-        b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
-        fp_cache_ = {true, slot_offset(a), D0};
-        b->patch_branch(mul_smi_done, b->code_size());
+        if (fast_path_) {
+            b->emit_mul(4, R0, R1);
+            b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
+            b->emit_orr(4, 4, 26);
+            b->emit_store_int(4, b->reg_base(), slot_offset(a));
+        } else {
+            b->emit_lsr_imm(2, R0, 48);
+            b->emit_load_imm64(3, 0xFFF7);
+            b->emit_cmp(2, 3);
+            size_t mul_smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0);
+            b->emit_lsr_imm(2, R1, 48);
+            b->emit_cmp(2, 3);
+            size_t mul_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
+            b->emit_mul(4, R0, R1);
+            b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
+            b->emit_orr(4, 4, 26);
+            b->emit_store_int(4, b->reg_base(), slot_offset(a));
+            size_t mul_smi_done = b->emit_branch(0);
+            b->patch_branch(mul_smi_bail_a, b->code_size());
+            b->patch_branch(mul_smi_bail_b, b->code_size());
+            b->emit_fmov_from_int(D0, R0);
+            b->emit_fmov_from_int(D1, R1);
+            b->emit_fmul(D0, D0, D1);
+            b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
+            fp_cache_ = {true, slot_offset(a), D0};
+            b->patch_branch(mul_smi_done, b->code_size());
+        }
         break;
     }
     case Opcode::DIV_NUM: {
@@ -696,31 +711,35 @@ bool JITCompiler::compile_instruction(int& pc) {
         break;
     }
     case Opcode::ADD_IMM: {
-        // Small int fast path for x += small_constant
         b->emit_load_int(R0, b->reg_base(), slot_offset(b8));
-        // Small int guard
-        b->emit_lsr_imm(2, R0, 48);
-        b->emit_load_imm64(3, 0xFFF7);
-        b->emit_cmp(2, 3);
-        size_t addi_smi_bail = b->emit_branch_cond(b->cond_ne(), 0);
-        // Fast path: add raw tagged value + raw immediate, mask to 48 bits, re-tag
-        b->emit_load_imm64(3, c8);
-        b->emit_add(4, R0, 3);
-        b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
-        b->emit_orr(4, 4, 26);  // X26 = cached SMALLINT_TAG
-        b->emit_store_int(4, b->reg_base(), slot_offset(a));
-        size_t addi_smi_done = b->emit_branch(0);
-        // FP fallback
-        b->patch_branch(addi_smi_bail, b->code_size());
-        b->emit_fmov_from_int(D0, R0);
-        double imm_d = static_cast<double>(c8);
-        uint64_t imm_bits;
-        std::memcpy(&imm_bits, &imm_d, 8);
-        b->emit_load_imm64(R0, imm_bits);
-        b->emit_fmov_from_int(D1, R0);
-        b->emit_fadd(D0, D0, D1);
-        b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
-        b->patch_branch(addi_smi_done, b->code_size());
+        if (fast_path_) {
+            b->emit_load_imm64(3, c8);
+            b->emit_add(4, R0, 3);
+            b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
+            b->emit_orr(4, 4, 26);
+            b->emit_store_int(4, b->reg_base(), slot_offset(a));
+        } else {
+            b->emit_lsr_imm(2, R0, 48);
+            b->emit_load_imm64(3, 0xFFF7);
+            b->emit_cmp(2, 3);
+            size_t addi_smi_bail = b->emit_branch_cond(b->cond_ne(), 0);
+            b->emit_load_imm64(3, c8);
+            b->emit_add(4, R0, 3);
+            b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
+            b->emit_orr(4, 4, 26);
+            b->emit_store_int(4, b->reg_base(), slot_offset(a));
+            size_t addi_smi_done = b->emit_branch(0);
+            b->patch_branch(addi_smi_bail, b->code_size());
+            b->emit_fmov_from_int(D0, R0);
+            double imm_d = static_cast<double>(c8);
+            uint64_t imm_bits;
+            std::memcpy(&imm_bits, &imm_d, 8);
+            b->emit_load_imm64(R0, imm_bits);
+            b->emit_fmov_from_int(D1, R0);
+            b->emit_fadd(D0, D0, D1);
+            b->emit_store_fp(D0, b->reg_base(), slot_offset(a));
+            b->patch_branch(addi_smi_done, b->code_size());
+        }
         break;
     }
     case Opcode::ADD_STR: {
@@ -742,58 +761,69 @@ bool JITCompiler::compile_instruction(int& pc) {
         break;
     }
     case Opcode::MOD_EQ_ZERO: {
-        // Small int fast path: SDIV + MSUB instead of FP fmod chain
         b->emit_load_int(R0, b->reg_base(), slot_offset(b8)); // n
         b->emit_load_int(R1, b->reg_base(), slot_offset(c8)); // i
-        // Small int guard
-        b->emit_lsr_imm(2, R0, 48);
-        b->emit_load_imm64(3, 0xFFF7);
-        b->emit_cmp(2, 3);
-        size_t mod_smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0);
-        b->emit_lsr_imm(2, R1, 48);
-        b->emit_cmp(2, 3);
-        size_t mod_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
-        // Extract signed 48-bit values
-        b->emit_lsl(4, R0, 16); b->emit_asr_imm(4, 4, 16);  // X4 = n
-        b->emit_lsl(5, R1, 16); b->emit_asr_imm(5, 5, 16);  // X5 = i
-        // n % i = n - (n/i)*i
-        b->emit_sdiv(2, 4, 5);       // X2 = n / i
-        b->emit_msub(2, 2, 5, 4);    // X2 = n - (n/i)*i
-        // Check if remainder == 0
-        b->emit_cmp_imm(2, 0);
-        size_t mod_smi_is_zero = b->emit_branch_cond(b->cond_eq(), 0);
-        // Not zero → FALSE
-        b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS));
-        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
-        size_t mod_smi_done = b->emit_branch(0);
-        // Zero → TRUE
-        b->patch_branch(mod_smi_is_zero, b->code_size());
-        b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS));
-        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
-        size_t mod_smi_done2 = b->emit_branch(0);
-        // FP fallback: inline fmod(n, i) == 0
-        b->patch_branch(mod_smi_bail_a, b->code_size());
-        b->patch_branch(mod_smi_bail_b, b->code_size());
-        b->emit_fmov_from_int(D0, R0);
-        b->emit_fmov_from_int(D1, R1);
-        b->emit_fdiv(D2, D0, D1);
-        b->emit_frintz(D2, D2);
-        b->emit_fmul(D2, D2, D1);
-        b->emit_fsub(D2, D0, D2);
-        b->emit_load_imm64(R0, 0);
-        b->emit_fmov_from_int(D3, R0);
-        b->emit_fcmp(D2, D3);
-        size_t mod_zero_br = b->emit_branch_cond(b->cond_eq(), 0);
-        b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS));
-        size_t mod_skip = b->emit_branch(0);
-        size_t mod_true_pos = b->code_size();
-        b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS));
-        size_t mod_store_pos = b->code_size();
-        b->emit_store_int(R0, b->reg_base(), slot_offset(a));
-        b->patch_branch(mod_zero_br, mod_true_pos);
-        b->patch_branch(mod_skip, mod_store_pos);
-        b->patch_branch(mod_smi_done, b->code_size());
-        b->patch_branch(mod_smi_done2, b->code_size());
+        if (fast_path_) {
+            // Type-specialized: skip guards and FP fallback entirely
+            b->emit_lsl(4, R0, 16); b->emit_asr_imm(4, 4, 16);  // X4 = n
+            b->emit_lsl(5, R1, 16); b->emit_asr_imm(5, 5, 16);  // X5 = i
+            b->emit_sdiv(2, 4, 5);       // X2 = n / i
+            b->emit_msub(2, 2, 5, 4);    // X2 = n - (n/i)*i
+            b->emit_cmp_imm(2, 0);
+            size_t fp_is_zero = b->emit_branch_cond(b->cond_eq(), 0);
+            b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS));
+            b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+            size_t fp_done = b->emit_branch(0);
+            b->patch_branch(fp_is_zero, b->code_size());
+            b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS));
+            b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+            b->patch_branch(fp_done, b->code_size());
+        } else {
+            // Small int guard
+            b->emit_lsr_imm(2, R0, 48);
+            b->emit_load_imm64(3, 0xFFF7);
+            b->emit_cmp(2, 3);
+            size_t mod_smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0);
+            b->emit_lsr_imm(2, R1, 48);
+            b->emit_cmp(2, 3);
+            size_t mod_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
+            b->emit_lsl(4, R0, 16); b->emit_asr_imm(4, 4, 16);
+            b->emit_lsl(5, R1, 16); b->emit_asr_imm(5, 5, 16);
+            b->emit_sdiv(2, 4, 5);
+            b->emit_msub(2, 2, 5, 4);
+            b->emit_cmp_imm(2, 0);
+            size_t mod_smi_is_zero = b->emit_branch_cond(b->cond_eq(), 0);
+            b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS));
+            b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+            size_t mod_smi_done = b->emit_branch(0);
+            b->patch_branch(mod_smi_is_zero, b->code_size());
+            b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS));
+            b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+            size_t mod_smi_done2 = b->emit_branch(0);
+            // FP fallback
+            b->patch_branch(mod_smi_bail_a, b->code_size());
+            b->patch_branch(mod_smi_bail_b, b->code_size());
+            b->emit_fmov_from_int(D0, R0);
+            b->emit_fmov_from_int(D1, R1);
+            b->emit_fdiv(D2, D0, D1);
+            b->emit_frintz(D2, D2);
+            b->emit_fmul(D2, D2, D1);
+            b->emit_fsub(D2, D0, D2);
+            b->emit_load_imm64(R0, 0);
+            b->emit_fmov_from_int(D3, R0);
+            b->emit_fcmp(D2, D3);
+            size_t mod_zero_br = b->emit_branch_cond(b->cond_eq(), 0);
+            b->emit_load_imm64(R0, static_cast<uint64_t>(FALSE_BITS));
+            size_t mod_skip = b->emit_branch(0);
+            size_t mod_true_pos = b->code_size();
+            b->emit_load_imm64(R0, static_cast<uint64_t>(TRUE_BITS));
+            size_t mod_store_pos = b->code_size();
+            b->emit_store_int(R0, b->reg_base(), slot_offset(a));
+            b->patch_branch(mod_zero_br, mod_true_pos);
+            b->patch_branch(mod_skip, mod_store_pos);
+            b->patch_branch(mod_smi_done, b->code_size());
+            b->patch_branch(mod_smi_done2, b->code_size());
+        }
         break;
     }
 
@@ -1064,45 +1094,56 @@ bool JITCompiler::compile_instruction(int& pc) {
 
     #define EMIT_FUSED_CMP_BRANCH(COND_FN, CMP_OP) do { \
         int target_bc = pc + (int8_t)c8; \
-        /* Small int fast path */ \
         b->emit_load_int(R0, b->reg_base(), slot_offset(a)); \
         b->emit_load_int(R1, b->reg_base(), slot_offset(b8)); \
-        b->emit_lsr_imm(2, R0, 48); \
-        b->emit_load_imm64(3, 0xFFF7); \
-        b->emit_cmp(2, 3); \
-        size_t _smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0); \
-        b->emit_lsr_imm(2, R1, 48); \
-        b->emit_cmp(2, 3); \
-        size_t _smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0); \
-        /* Raw compare: tag bits are identical, so CMP compares values directly */ \
-        b->emit_cmp(R0, R1); \
-        size_t _smi_br = b->emit_branch_cond(b->COND_FN(), 0); \
-        size_t _smi_skip = b->emit_branch(0); \
-        /* FP fallback */ \
-        b->patch_branch(_smi_bail_a, b->code_size()); \
-        b->patch_branch(_smi_bail_b, b->code_size()); \
-        if (fp_cache_.valid && fp_cache_.slot_byte_offset == slot_offset(a) && fp_cache_.fp_reg == D0) { \
-        } else { \
-            b->emit_load_fp(D0, b->reg_base(), slot_offset(a)); \
-        } \
-        invalidate_fp_cache(); \
-        b->emit_load_fp(D1, b->reg_base(), slot_offset(b8)); \
-        b->emit_fcmp(D0, D1); \
-        size_t _fp_br = b->emit_branch_cond(b->COND_FN(), 0); \
-        /* Both no-branch paths converge */ \
-        b->patch_branch(_smi_skip, b->code_size()); \
-        /* Patch branch targets */ \
-        if ((int8_t)c8 < 0) { \
-            if (target_bc >= 0 && target_bc / 4 < (int)bc_to_code_.size()) { \
-                int tc = bc_to_code_[target_bc / 4]; \
-                if (tc >= 0) { \
-                    b->patch_branch(_smi_br, (size_t)tc); \
-                    b->patch_branch(_fp_br, (size_t)tc); \
+        if (fast_path_) { \
+            /* Type-specialized: direct integer comparison, no guards */ \
+            b->emit_cmp(R0, R1); \
+            size_t _br = b->emit_branch_cond(b->COND_FN(), 0); \
+            if ((int8_t)c8 < 0) { \
+                if (target_bc >= 0 && target_bc / 4 < (int)bc_to_code_.size()) { \
+                    int tc = bc_to_code_[target_bc / 4]; \
+                    if (tc >= 0) { b->patch_branch(_br, (size_t)tc); } \
+                    else { emit_bailout(start_pc); return false; } \
                 } else { emit_bailout(start_pc); return false; } \
-            } else { emit_bailout(start_pc); return false; } \
-        } else if ((int8_t)c8 > 0) { \
-            fixups_.push_back({_smi_br, target_bc, 1}); \
-            fixups_.push_back({_fp_br, target_bc, 1}); \
+            } else if ((int8_t)c8 > 0) { \
+                fixups_.push_back({_br, target_bc, 1}); \
+            } \
+        } else { \
+            /* Guard checks */ \
+            b->emit_lsr_imm(2, R0, 48); \
+            b->emit_load_imm64(3, 0xFFF7); \
+            b->emit_cmp(2, 3); \
+            size_t _smi_bail_a = b->emit_branch_cond(b->cond_ne(), 0); \
+            b->emit_lsr_imm(2, R1, 48); \
+            b->emit_cmp(2, 3); \
+            size_t _smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0); \
+            b->emit_cmp(R0, R1); \
+            size_t _smi_br = b->emit_branch_cond(b->COND_FN(), 0); \
+            size_t _smi_skip = b->emit_branch(0); \
+            b->patch_branch(_smi_bail_a, b->code_size()); \
+            b->patch_branch(_smi_bail_b, b->code_size()); \
+            if (fp_cache_.valid && fp_cache_.slot_byte_offset == slot_offset(a) && fp_cache_.fp_reg == D0) { \
+            } else { \
+                b->emit_load_fp(D0, b->reg_base(), slot_offset(a)); \
+            } \
+            invalidate_fp_cache(); \
+            b->emit_load_fp(D1, b->reg_base(), slot_offset(b8)); \
+            b->emit_fcmp(D0, D1); \
+            size_t _fp_br = b->emit_branch_cond(b->COND_FN(), 0); \
+            b->patch_branch(_smi_skip, b->code_size()); \
+            if ((int8_t)c8 < 0) { \
+                if (target_bc >= 0 && target_bc / 4 < (int)bc_to_code_.size()) { \
+                    int tc = bc_to_code_[target_bc / 4]; \
+                    if (tc >= 0) { \
+                        b->patch_branch(_smi_br, (size_t)tc); \
+                        b->patch_branch(_fp_br, (size_t)tc); \
+                    } else { emit_bailout(start_pc); return false; } \
+                } else { emit_bailout(start_pc); return false; } \
+            } else if ((int8_t)c8 > 0) { \
+                fixups_.push_back({_smi_br, target_bc, 1}); \
+                fixups_.push_back({_fp_br, target_bc, 1}); \
+            } \
         } \
     } while(0)
 
@@ -1468,6 +1509,27 @@ void JITCompiler::fixup_jumps() {
     fixups_.clear();
 }
 
+bool JITCompiler::is_integer_function() const {
+    // Check if all ops in the bytecode have small-int fast paths.
+    // If any op requires FP (DIV, MOD non-fused, NEG, strings), return false.
+    int pc = 0;
+    while (pc < static_cast<int>(bytecode_.size())) {
+        if (pc + 4 > static_cast<int>(bytecode_.size())) break;
+        uint8_t op = bytecode_[pc];
+        switch (static_cast<Opcode>(op)) {
+            case Opcode::DIV:
+            case Opcode::MOD:
+            case Opcode::NEG:
+            case Opcode::ADD_STR:
+                return false;
+            default:
+                break;
+        }
+        pc += 4;
+    }
+    return true;
+}
+
 JITCode* JITCompiler::compile(ObjFunction* function) {
     if (!function || function->bytecode.empty()) return nullptr;
     if (function->bytecode.size() < 16) return nullptr;
@@ -1489,6 +1551,22 @@ JITCode* JITCompiler::compile(ObjFunction* function) {
     // Prologue
     backend_->emit_prologue();
 
+    // Type specialization: check if function is integer-only
+    // If so, emit fast path with no guard checks
+    fast_path_ = is_integer_function();
+    if (fast_path_) {
+        // Entry check: verify first param is small int, bail to interpreter if not
+        int R0e = backend_->scratch0();
+        backend_->emit_load_int(R0e, backend_->reg_base(), 0); // load first param
+        backend_->emit_lsr_imm(2, R0e, 48);
+        backend_->emit_load_imm64(3, 0xFFF7);
+        backend_->emit_cmp(2, 3);
+        size_t ok_branch = backend_->emit_branch_cond(backend_->cond_eq(), 0);
+        // Not small int → bail with jit_pc=0 (interpreter re-executes)
+        emit_bailout(0);
+        backend_->patch_branch(ok_branch, backend_->code_size());
+    }
+
     // Compile bytecode
     int pc = 0;
     while (pc < total_bc) {
@@ -1498,6 +1576,7 @@ JITCode* JITCompiler::compile(ObjFunction* function) {
 
     // End-of-function bailout
     emit_bailout(total_bc);
+    fast_path_ = false; // reset for next compilation
 
     // Fix up jumps
     fixup_jumps();
