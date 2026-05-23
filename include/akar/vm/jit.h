@@ -75,6 +75,9 @@ public:
     virtual void emit_store_int(int src, int base, int offset) = 0;
     virtual void emit_load_fp(int dest_fp, int base, int offset) = 0;
     virtual void emit_store_fp(int src_fp, int base, int offset) = 0;
+    // Load a NaN-boxed value and convert to double in FP register.
+    // Handles small ints (tag 0xFFF7...), regular doubles, and NaN-boxed doubles.
+    virtual void emit_load_value_as_fp(int dest_fp, int base, int offset) = 0;
     virtual void emit_load_imm64(int dest, uint64_t imm) = 0;
 
     // --- Move ---
@@ -164,6 +167,10 @@ std::unique_ptr<JITBackend> create_jit_backend();
 
 // Set the VM pointer for JIT call helpers (must be called before JIT execution)
 void jit_set_vm(VM* vm);
+
+// Convert NaN-boxed bits to regular double bits (handles small ints).
+// Returns raw double bits. If already a regular double, returns unchanged.
+int64_t jit_to_double_bits(int64_t bits);
 
 // ============================================================
 // JIT Compiler — platform-independent compilation logic

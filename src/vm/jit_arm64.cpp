@@ -181,6 +181,16 @@ public:
         emit32(enc_str_d(src_fp, base, offset));
     }
 
+    void emit_load_value_as_fp(int dest_fp, int base, int offset) override {
+        // Load raw 64-bit bits into scratch int register
+        emit32(enc_ldr(R_SCRATCH0, base, offset));
+        // Call jit_to_double_bits(X0) → result in X0 as raw double bits
+        emit_load_imm64(8, reinterpret_cast<uint64_t>(static_cast<int64_t(*)(int64_t)>(&jit_to_double_bits)));
+        emit32(enc_blr(8));
+        // Move raw double bits from X0 to FP register
+        emit32(enc_fmov_from_x(dest_fp, R_SCRATCH0));
+    }
+
     void emit_load_imm64(int dest, uint64_t imm) override {
         bool first = true;
         for (int i = 0; i < 4; i++) {
@@ -253,7 +263,8 @@ public:
     void emit_msub(int dest, int src1, int src2, int src3) override {
         // MSUB Xd, Xn, Xm, Xa → Rd = Ra - Rn * Rm
         // Here: dest = src3 - src1 * src2
-        emit32(0x9B000200u | ((src2 & 0x1Fu) << 16) | ((src3 & 0x1Fu) << 10) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
+        // Base: 0x9B008000 (o0=1 at bit 15 distinguishes MSUB from MADD)
+        emit32(0x9B008000u | ((src2 & 0x1Fu) << 16) | ((src3 & 0x1Fu) << 10) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
     }
 
     void emit_fadd(int d, int s1, int s2) override { emit32(enc_fadd(d, s1, s2)); }

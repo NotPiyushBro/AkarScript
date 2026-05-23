@@ -35,6 +35,22 @@ static VM* g_jit_vm = nullptr;
 
 void jit_set_vm(VM* vm) { g_jit_vm = vm; }
 
+// Convert NaN-boxed bits to raw double bits (handles small ints).
+// If already a regular NaN-boxed double, returns the bits unchanged.
+// If a small int, extracts the 48-bit signed value and converts to double.
+int64_t jit_to_double_bits(int64_t bits) {
+    uint64_t b = static_cast<uint64_t>(bits);
+    if ((b & 0xFFFF000000000000ULL) == Value::SMALLINT_TAG) {
+        // Extract signed 48-bit value and convert to double
+        int64_t v = static_cast<int64_t>(b << 16) >> 16;
+        double d = static_cast<double>(v);
+        uint64_t dbits;
+        std::memcpy(&dbits, &d, 8);
+        return static_cast<int64_t>(dbits);
+    }
+    return bits; // already valid double bits
+}
+
 // --- Utility ---
 static inline int64_t value_to_bits(Value v) {
     uint64_t bits;
@@ -480,10 +496,10 @@ bool JITCompiler::compile_instruction(int& pc) {
     // ================================================================
 
     case Opcode::LOAD_IMM: {
-        double d = static_cast<double>(b8);
-        uint64_t bits;
-        std::memcpy(&bits, &d, 8);
-        b->emit_load_imm64(R0, bits);
+        // Store as small int (consistent with interpreter's Value(double) constructor
+        // which auto-converts integer doubles to small ints)
+        uint64_t smi = Value::SMALLINT_TAG | (static_cast<uint64_t>(b8) & Value::SMALLINT_MASK);
+        b->emit_load_imm64(R0, smi);
         b->emit_store_int(R0, b->reg_base(), slot_offset(a));
         break;
     }
@@ -1098,14 +1114,15 @@ bool JITCompiler::compile_instruction(int& pc) {
         } \
     } while(0)
 
-    // NOTE: The original COND_FN was the comparison itself (cond_le for JMP_IF_NOT_LTE).
-    // This is technically wrong (should be the negation), but it's been working because
-    // tests don't check correctness. Reverting to original for now.
-    case Opcode::JMP_IF_NOT_LT:  EMIT_FUSED_CMP_BRANCH(cond_lt, lt); break;
-    case Opcode::JMP_IF_NOT_LTE: EMIT_FUSED_CMP_BRANCH(cond_le, le); break;
-    case Opcode::JMP_IF_NOT_GT:  EMIT_FUSED_CMP_BRANCH(cond_gt, gt); break;
-    case Opcode::JMP_IF_NOT_GTE: EMIT_FUSED_CMP_BRANCH(cond_ge, ge); break;
-    case Opcode::JMP_IF_NOT_EQ:  EMIT_FUSED_CMP_BRANCH(cond_eq, eq); break;
+    // COND_FN must be the NEGATION of the comparison.
+    // JMP_IF_NOT_LT means "jump if !(a < b)" i.e. "jump if a >= b" → cond_ge
+    // JMP_IF_NOT_LTE means "jump if !(a <= b)" i.e. "jump if a > b" → cond_gt
+    // etc.
+    case Opcode::JMP_IF_NOT_LT:  EMIT_FUSED_CMP_BRANCH(cond_ge, lt); break;
+    case Opcode::JMP_IF_NOT_LTE: EMIT_FUSED_CMP_BRANCH(cond_gt, le); break;
+    case Opcode::JMP_IF_NOT_GT:  EMIT_FUSED_CMP_BRANCH(cond_le, gt); break;
+    case Opcode::JMP_IF_NOT_GTE: EMIT_FUSED_CMP_BRANCH(cond_lt, ge); break;
+    case Opcode::JMP_IF_NOT_EQ:  EMIT_FUSED_CMP_BRANCH(cond_ne, eq); break;
 
     #undef EMIT_FUSED_CMP_BRANCH
 
