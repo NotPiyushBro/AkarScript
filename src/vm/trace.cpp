@@ -432,7 +432,6 @@ bool TraceCompiler::emit_callee_body(
         if (!emit_bc_instruction(bc.data(), pc, callee_base_slot, regs,
                                   result_phys, fwd_fixups, ret_fixups,
                                   &callee->constants)) {
-            fprintf(stderr, "[trace] callee emit failed at pc %d op %d\n", pc, bc[pc]);
             return false;
         }
         pc += 4;
@@ -581,9 +580,6 @@ JITCode* TraceCompiler::compile(VM* vm, ObjFunction* func, int loop_start_pc, in
         }
     }
 
-    fprintf(stderr, "[trace] compiling: while(R%d<=%ld) { if(%s(R%d)) ... } %d accumulators\n",
-            n_reg, limit, callee->name.c_str(), n_reg, (int)acc_regs.size());
-
     // ---- Emit ARM64 ----
     b->reset();
 
@@ -707,11 +703,7 @@ JITCode* TraceCompiler::compile(VM* vm, ObjFunction* func, int loop_start_pc, in
     b->emit_epilogue();
 
     // ---- Finalize ----
-    JITCode* code = b->finalize();
-    if (code) {
-        fprintf(stderr, "[trace] compiled trace: %zu bytes\n", code->size);
-    }
-    return code;
+    return b->finalize();
 }
 
 } // namespace akar
