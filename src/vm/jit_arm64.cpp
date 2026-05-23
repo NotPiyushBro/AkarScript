@@ -218,11 +218,13 @@ public:
     }
 
     void emit_lsl(int dest, int src, int shift) override {
-        emit32(0xD3400000u | (((64 - shift) & 0x3Fu) << 16) | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
+        // LSL #shift = UBFM Xd, Xn, #(64-shift), #(63-shift)
+        emit32(0xD3400000u | (((64 - shift) & 0x3Fu) << 16) | (((63 - shift) & 0x3Fu) << 10) | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
     }
 
     void emit_lsr(int dest, int src, int shift) override {
-        emit32(0xD3400000u | ((shift & 0x3Fu) << 16) | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
+        // LSR #shift = UBFM Xd, Xn, #shift, #63
+        emit32(0xD3400000u | ((shift & 0x3Fu) << 16) | (63u << 10) | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
     }
 
     void emit_mvn(int dest, int src) override {
