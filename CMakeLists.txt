@@ -23,6 +23,7 @@ add_library(akar_core STATIC
     src/vm/gc.cpp
     src/vm/profiler.cpp
     src/vm/jit.cpp
+src/vm/trace.cpp
 )
 
 # JIT backends: compile the one matching the current architecture

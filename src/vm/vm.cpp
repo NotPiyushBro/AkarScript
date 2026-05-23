@@ -23,6 +23,11 @@ VM::VM() {
 }
 
 VM::~VM() {
+    // Clean up compiled traces
+    for (auto& [key, code] : compiled_traces_) {
+        delete code;
+    }
+    compiled_traces_.clear();
     active_vms_.erase(this);
     // If this is the last VM, free all objects
     if (active_vms_.empty()) {
@@ -820,6 +825,50 @@ InterpretResult VM::run() {
         if (offset < 0) { // backward jump = loop back-edge
             CHECK_MEMORY_LIMIT();
             if (yield_pending_) HANDLE_FIBER_YIELD();
+
+            // Trace JIT: detect hot loops and execute compiled traces
+            if (trace_jit_enabled_) {
+                uint8_t* loop_header = ip; // ip points to loop start after jump
+                auto trace_it = compiled_traces_.find(loop_header);
+                if (trace_it != compiled_traces_.end()) {
+                    // Execute compiled trace
+                    frame->ip = ip;
+                    jit_set_vm(this);
+                    int exit_pc = 0;
+                    JITResult result = trace_it->second->entry(
+                        stack_, base, &exit_pc,
+                        frame->closure->function->constants.data(),
+                        0, stack_top_, frame->closure);
+                    if (result == JITResult::Done) {
+                        ip = frame->closure->function->bytecode.data() + exit_pc;
+                        frame->ip = ip;
+                        DISPATCH();
+                    }
+                    // Bail: continue from exit_pc
+                    ip = frame->closure->function->bytecode.data() + exit_pc;
+                    frame->ip = ip;
+                    DISPATCH();
+                }
+                // Count back-edges for this loop
+                auto& count = trace_hot_counts_[loop_header];
+                if (count >= 0) {
+                    if (++count >= TRACE_COMPILE_THRESHOLD) {
+                        // Compile trace for this loop
+                        ObjFunction* func = frame->closure->function;
+                        int loop_start_pc = loop_header - func->bytecode.data();
+                        // The back-edge is at (ip - offset - 4) since ip already advanced
+                        uint8_t* back_edge_ip = ip - offset; // original JMP instruction
+                        int back_edge_pc = back_edge_ip - func->bytecode.data();
+                        JITCode* trace = trace_compiler_.compile(this, func, loop_start_pc, back_edge_pc);
+                        if (trace) {
+                            compiled_traces_[loop_header] = trace;
+                            fprintf(stderr, "[trace] compiled loop at pc %d, %zu bytes\n",
+                                    loop_start_pc, trace->size);
+                        }
+                        count = -1; // mark as attempted (don't retry)
+                    }
+                }
+            }
         }
         DISPATCH();
     }

@@ -5,6 +5,7 @@
 #include "akar/vm/object_file.h"
 #include "akar/vm/profiler.h"
 #include "akar/vm/jit.h"
+#include "akar/vm/trace.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <deque>
@@ -176,6 +177,13 @@ public:
     // JIT compiler
     JITCache jit_cache_;
     bool jit_enabled_ = true;
+
+    // Trace JIT: hot loop detection and compiled traces
+    std::unordered_map<uint8_t*, int> trace_hot_counts_;
+    std::unordered_map<uint8_t*, JITCode*> compiled_traces_;
+    TraceCompiler trace_compiler_;
+    static constexpr int TRACE_COMPILE_THRESHOLD = 2000;
+    bool trace_jit_enabled_ = true;
 
     // Direct JIT call from JIT helper (avoids vector allocation)
     Value jit_call_direct(ObjClosure* closure, Value* args, int arg_count);
