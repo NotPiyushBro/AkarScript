@@ -126,6 +126,7 @@ void VM::gc_step() {
             }
             gc_mark_string_table();
             gc_phase_ = GCPhase::Marking;
+            gc_set_marking(true); // write barrier: mark new allocations
             // Fall through to do some marking work
             [[fallthrough]];
         }
@@ -147,6 +148,7 @@ void VM::gc_step() {
                 gc_mark_string_table();
                 // If gray stack is still empty after re-marking, move to sweep
                 if (gc_gray_stack_empty()) {
+                    gc_set_marking(false); // no more new allocations to protect
                     gc_phase_ = GCPhase::Sweeping;
                 }
                 // Otherwise continue marking next step

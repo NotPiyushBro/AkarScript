@@ -10,6 +10,12 @@ static size_t g_allocated_bytes = 0;
 static size_t g_memory_limit = 256 * 1024 * 1024; // 256 MB default
 static size_t g_next_gc = 1024;
 static std::vector<Obj*> g_gray_stack;
+// Write barrier: when true, newly allocated objects are immediately marked
+// to prevent the incremental GC from sweeping them before they're traced.
+static bool g_gc_marking = false;
+
+void gc_set_marking(bool active) { g_gc_marking = active; }
+bool gc_is_marking() { return g_gc_marking; }
 
 static void track_alloc(size_t bytes) {
     g_allocated_bytes += bytes;
@@ -221,6 +227,14 @@ void gc_mark_string_table() {
     get_string_table().mark_all();
 }
 
+// Write barrier: mark new objects during GC to prevent sweeping reachable objects
+static void gc_write_barrier(Obj* obj) {
+    if (g_gc_marking && !obj->marked) {
+        obj->marked = true;
+        g_gray_stack.push_back(obj);
+    }
+}
+
 ObjString* allocate_string(std::string value) {
     size_t bytes = sizeof(ObjString) + value.capacity();
     track_alloc(bytes);
@@ -228,6 +242,7 @@ ObjString* allocate_string(std::string value) {
     obj->alloc_size = bytes;
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -237,6 +252,7 @@ ObjArray* allocate_array() {
     obj->alloc_size = sizeof(ObjArray);
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -246,6 +262,7 @@ ObjMap* allocate_map() {
     obj->alloc_size = sizeof(ObjMap);
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -255,6 +272,7 @@ ObjFunction* allocate_function() {
     obj->alloc_size = sizeof(ObjFunction);
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -264,6 +282,7 @@ ObjClosure* allocate_closure(ObjFunction* func) {
     obj->alloc_size = sizeof(ObjClosure);
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -274,6 +293,7 @@ ObjClass* allocate_class(std::string name) {
     obj->alloc_size = bytes;
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -283,6 +303,7 @@ ObjInstance* allocate_instance(ObjClass* klass) {
     obj->alloc_size = sizeof(ObjInstance);
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -293,6 +314,7 @@ ObjNative* allocate_native(NativeFn fn, std::string name) {
     obj->alloc_size = bytes;
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -302,6 +324,7 @@ ObjUpvalue* allocate_upvalue(Value* slot) {
     obj->alloc_size = sizeof(ObjUpvalue);
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -311,6 +334,7 @@ ObjFiber* allocate_fiber() {
     obj->alloc_size = sizeof(ObjFiber);
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -320,6 +344,7 @@ ObjIterator* allocate_iterator() {
     obj->alloc_size = sizeof(ObjIterator);
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -332,6 +357,7 @@ ObjSignal* allocate_signal(Value initial_value, const std::string& name) {
     obj->alloc_size = bytes;
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 
@@ -344,6 +370,7 @@ ObjEffect* allocate_effect(ObjClosure* body, const std::string& name) {
     obj->alloc_size = bytes;
     obj->next = g_objects;
     g_objects = obj;
+    gc_write_barrier(obj);
     return obj;
 }
 

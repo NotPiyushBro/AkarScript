@@ -395,6 +395,8 @@ void gc_trace_references(Obj* obj);
 void gc_sweep();
 size_t gc_drain_gray_stack();
 void gc_mark_string_table();
+void gc_set_marking(bool active);
+bool gc_is_marking();
 
 // Incremental GC helpers
 bool gc_gray_stack_empty();
