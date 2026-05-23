@@ -85,6 +85,8 @@ public:
 
     // --- Integer arithmetic ---
     virtual void emit_add(int dest, int src1, int src2) = 0;
+    // Add 12-bit unsigned immediate: dest = src + imm12
+    virtual void emit_add_imm(int dest, int src, uint64_t imm12) = 0;
     virtual void emit_sub(int dest, int src1, int src2) = 0;
     virtual void emit_and(int dest, int src1, int src2) = 0;
     virtual void emit_orr(int dest, int src1, int src2) = 0;

@@ -215,6 +215,11 @@ public:
         emit32(0x8B000000u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
     }
 
+    void emit_add_imm(int dest, int src, uint64_t imm12) override {
+        // ADD Xd, Xn, #imm12 (12-bit unsigned immediate)
+        emit32(0x91000000u | ((static_cast<uint32_t>(imm12 & 0xFFF) & 0xFFFu) << 10) | ((src & 0x1Fu) << 5) | (dest & 0x1Fu));
+    }
+
     void emit_sub(int dest, int src1, int src2) override {
         emit32(0xCB000000u | ((src2 & 0x1Fu) << 16) | ((src1 & 0x1Fu) << 5) | (dest & 0x1Fu));
     }
