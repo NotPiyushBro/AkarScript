@@ -600,12 +600,11 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_lsr_imm(2, R1, 48);
         b->emit_cmp(2, 3);
         size_t add_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
-        b->emit_lsl(4, R0, 16); b->emit_asr_imm(4, 4, 16);
-        b->emit_lsl(5, R1, 16); b->emit_asr_imm(5, 5, 16);
-        b->emit_add(4, 4, 5);
+        // Fast path: add raw tagged values, mask to 48 bits, re-tag
+        // The tag bits (0xFFF7) cancel/add harmlessly since we mask below
+        b->emit_add(4, R0, R1);
         b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
-        b->emit_load_imm64(3, Value::SMALLINT_TAG);
-        b->emit_orr(4, 4, 3);
+        b->emit_orr(4, 4, 26);  // X26 = cached SMALLINT_TAG
         b->emit_store_int(4, b->reg_base(), slot_offset(a));
         size_t add_smi_done = b->emit_branch(0);
         b->patch_branch(add_smi_bail_a, b->code_size());
@@ -628,12 +627,10 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_lsr_imm(2, R1, 48);
         b->emit_cmp(2, 3);
         size_t sub_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
-        b->emit_lsl(4, R0, 16); b->emit_asr_imm(4, 4, 16);
-        b->emit_lsl(5, R1, 16); b->emit_asr_imm(5, 5, 16);
-        b->emit_sub(4, 4, 5);
+        // Fast path: subtract raw tagged values, mask to 48 bits, re-tag
+        b->emit_sub(4, R0, R1);
         b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
-        b->emit_load_imm64(3, Value::SMALLINT_TAG);
-        b->emit_orr(4, 4, 3);
+        b->emit_orr(4, 4, 26);  // X26 = cached SMALLINT_TAG
         b->emit_store_int(4, b->reg_base(), slot_offset(a));
         size_t sub_smi_done = b->emit_branch(0);
         b->patch_branch(sub_smi_bail_a, b->code_size());
@@ -662,13 +659,11 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_lsr_imm(2, R1, 48);
         b->emit_cmp(2, 3);
         size_t mul_smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0);
-        // Both small ints: extract signed 48-bit, multiply, re-tag
-        b->emit_lsl(4, R0, 16); b->emit_asr_imm(4, 4, 16);  // sign-extend
-        b->emit_lsl(5, R1, 16); b->emit_asr_imm(5, 5, 16);
-        b->emit_mul(4, 4, 5);                                  // X4 = a * b
+        // Both small ints: multiply raw tagged values, mask to 48 bits, re-tag
+        // Lower 48 bits of (TAG|a)*(TAG|b) = a*b (tag bits contribute only to upper bits)
+        b->emit_mul(4, R0, R1);                                  // X4 = a * b (raw)
         b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);        // mask 48 bits
-        b->emit_load_imm64(3, Value::SMALLINT_TAG);
-        b->emit_orr(4, 4, 3);                                  // re-tag
+        b->emit_orr(4, 4, 26);                                  // X26 = cached SMALLINT_TAG
         b->emit_store_int(4, b->reg_base(), slot_offset(a));
         size_t mul_smi_done = b->emit_branch(0);
         // FP fallback
@@ -708,13 +703,11 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_load_imm64(3, 0xFFF7);
         b->emit_cmp(2, 3);
         size_t addi_smi_bail = b->emit_branch_cond(b->cond_ne(), 0);
-        // Extract, add immediate, re-tag
-        b->emit_lsl(4, R0, 16); b->emit_asr_imm(4, 4, 16);  // X4 = signed value
-        b->emit_load_imm64(3, c8);                              // X3 = immediate
-        b->emit_add(4, 4, 3);                                    // X4 = value + imm
-        b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);          // mask 48 bits
-        b->emit_load_imm64(3, Value::SMALLINT_TAG);
-        b->emit_orr(4, 4, 3);                                    // re-tag
+        // Fast path: add raw tagged value + raw immediate, mask to 48 bits, re-tag
+        b->emit_load_imm64(3, c8);
+        b->emit_add(4, R0, 3);
+        b->emit_lsl(4, 4, 16); b->emit_lsr_imm(4, 4, 16);
+        b->emit_orr(4, 4, 26);  // X26 = cached SMALLINT_TAG
         b->emit_store_int(4, b->reg_base(), slot_offset(a));
         size_t addi_smi_done = b->emit_branch(0);
         // FP fallback
@@ -1081,8 +1074,7 @@ bool JITCompiler::compile_instruction(int& pc) {
         b->emit_lsr_imm(2, R1, 48); \
         b->emit_cmp(2, 3); \
         size_t _smi_bail_b = b->emit_branch_cond(b->cond_ne(), 0); \
-        b->emit_lsl(R0, R0, 16); b->emit_asr_imm(R0, R0, 16); \
-        b->emit_lsl(R1, R1, 16); b->emit_asr_imm(R1, R1, 16); \
+        /* Raw compare: tag bits are identical, so CMP compares values directly */ \
         b->emit_cmp(R0, R1); \
         size_t _smi_br = b->emit_branch_cond(b->COND_FN(), 0); \
         size_t _smi_skip = b->emit_branch(0); \

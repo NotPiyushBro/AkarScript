@@ -96,6 +96,7 @@ public:
     static constexpr int R_CALLEE = 23;  // X23 = callee_pos (for RETURN)
     static constexpr int R_CALLER = 24;  // X24 = caller_top (for RETURN)
     static constexpr int R_CLOSURE = 25; // X25 = closure pointer
+    static constexpr int R_SMI_TAG = 26; // X26 = cached SMALLINT_TAG (0xFFF7000000000000)
 
     // Scratch (caller-saved)
     static constexpr int R_SCRATCH0 = 0;  // X0
@@ -146,6 +147,9 @@ public:
         emit32(enc_mov_reg(R_CALLEE, 4));       // X23 = callee_pos
         emit32(enc_mov_reg(R_CALLER, 5));       // X24 = caller_top
         emit32(enc_mov_reg(R_CLOSURE, 6));      // X25 = closure
+
+        // Cache SMALLINT_TAG in X26 for fast small int re-tagging
+        emit_load_imm64(R_SMI_TAG, 0xFFF7000000000000ULL);
     }
 
     void emit_epilogue() override {
