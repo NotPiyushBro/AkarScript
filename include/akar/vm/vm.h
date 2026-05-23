@@ -80,6 +80,8 @@ public:
     GCPhase gc_phase_ = GCPhase::Idle;
     static constexpr int GC_MARK_WORK = 64;   // objects to trace per incremental step
     static constexpr int GC_SWEEP_WORK = 32;  // objects to sweep per incremental step
+    double gc_step_start_us_ = 0;      // GC profiling: start time of current cycle
+    size_t gc_step_before_bytes_ = 0;  // GC profiling: allocated bytes before sweep
 
     // Fiber yield support
     bool yield_pending_ = false;

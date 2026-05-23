@@ -118,8 +118,16 @@ void VM::gc_step() {
     // Only start GC if threshold exceeded
     if (gc_phase_ == GCPhase::Idle && get_allocated_bytes() < get_next_gc()) return;
 
+    bool gc_profiled = profiler_.is_profiling();
+
     switch (gc_phase_) {
         case GCPhase::Idle: {
+            // Profiler: record GC start
+            if (gc_profiled) {
+                gc_step_start_us_ = profiler_.now_us();
+                gc_step_before_bytes_ = get_allocated_bytes();
+                profiler_.record_gc_start();
+            }
             // Start marking: mark roots from ALL active VMs
             for (VM* vm : active_vms_) {
                 vm->mark_roots();
@@ -162,6 +170,13 @@ void VM::gc_step() {
             gc_sweep();
             gc_phase_ = GCPhase::Idle;
             set_next_gc(get_allocated_bytes() * 2);
+            // Profiler: record GC end
+            if (gc_profiled) {
+                double gc_dur = profiler_.now_us() - gc_step_start_us_;
+                size_t freed = (gc_step_before_bytes_ > get_allocated_bytes())
+                    ? (gc_step_before_bytes_ - get_allocated_bytes()) : 0;
+                profiler_.record_gc_end(gc_dur, freed);
+            }
             return;
         }
     }
