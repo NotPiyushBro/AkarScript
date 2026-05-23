@@ -862,8 +862,6 @@ InterpretResult VM::run() {
                         JITCode* trace = trace_compiler_.compile(this, func, loop_start_pc, back_edge_pc);
                         if (trace) {
                             compiled_traces_[loop_header] = trace;
-                            fprintf(stderr, "[trace] compiled loop at pc %d, %zu bytes\n",
-                                    loop_start_pc, trace->size);
                         }
                         count = -1; // mark as attempted (don't retry)
                     }
