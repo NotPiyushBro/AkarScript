@@ -6,27 +6,32 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include "akar/util/repl.h"
 #include <string>
 
-static void repl() {
-    akar::VM vm;
-    std::cout << "Akar Script v0.1.0" << std::endl;
-    std::cout << "Type 'exit' to quit." << std::endl;
-
-    std::string line;
-    while (true) {
-        std::cout << "> ";
-        if (!std::getline(std::cin, line)) break;
-        if (line == "exit" || line == "quit") break;
-        if (line.empty()) continue;
-
-        auto result = vm.interpret(line);
-        if (result == akar::InterpretResult::CompileError) {
-            std::cerr << "Compile error: " << vm.last_error() << std::endl;
-        } else if (result == akar::InterpretResult::RuntimeError) {
-            std::cerr << "Runtime error: " << vm.last_error() << std::endl;
+static bool is_incomplete(const std::string& code) {
+    int depth = 0;
+    bool in_str = false;
+    char sc = 0;
+    for (size_t i = 0; i < code.size(); i++) {
+        char c = code[i];
+        if (in_str) {
+            if (c == sc && (i == 0 || code[i - 1] != '\\')) in_str = false;
+            continue;
         }
+        if (c == '"' || c == '\'') { in_str = true; sc = c; continue; }
+        if (c == '/' && i + 1 < code.size() && code[i + 1] == '/') {
+            while (i < code.size() && code[i] != '\n') i++;
+            continue;
+        }
+        if (c == '{' || c == '(' || c == '[') depth++;
+        if (c == '}' || c == ')' || c == ']') depth--;
     }
+    return depth > 0;
+}
+
+static void repl() {
+    // Legacy repl — kept for reference but unused
 }
 
 static bool ends_with(const std::string& str, const std::string& suffix) {
@@ -229,17 +234,25 @@ int main(int argc, char* argv[]) {
     vm.set_verbose(verbose);
     if (profile) vm.set_profiling(true);
     if (trace) vm.set_tracing(true);
+
+    akar::LineEditor editor;
     std::cout << "Akar Script v0.1.0" << std::endl;
-    std::cout << "Type 'exit' to quit." << std::endl;
+    std::cout << "Type 'exit' to quit. Arrow keys, history, and tab completion supported." << std::endl;
 
-    std::string line;
     while (true) {
-        std::cout << "> ";
-        if (!std::getline(std::cin, line)) break;
-        if (line == "exit" || line == "quit") break;
-        if (line.empty()) continue;
+        std::string input;
+        if (!editor.readline("> ", input)) break;  // EOF (Ctrl+D on empty line)
+        if (input == "exit" || input == "quit") break;
+        if (input.empty()) continue;
 
-        auto result = vm.interpret(line);
+        // Multi-line: accumulate until expression is complete
+        while (is_incomplete(input)) {
+            std::string more;
+            if (!editor.readline(".. ", more)) break;
+            input += "\n" + more;
+        }
+
+        auto result = vm.interpret(input);
         if (result == akar::InterpretResult::CompileError) {
             std::cerr << "Compile error: " << vm.last_error() << std::endl;
         } else if (result == akar::InterpretResult::RuntimeError) {
