@@ -1,5 +1,6 @@
 #include "akar/vm/vm.h"
 #include "akar/vm/object_file.h"
+#include "akar/vm/system.h"
 #include "akar/compiler/lexer.h"
 #include "akar/compiler/parser.h"
 #include "akar/compiler/codegen.h"
@@ -20,6 +21,7 @@ VM::VM() {
     open_upvalues_ = nullptr;
     active_vms_.insert(this);
     register_builtins(*this);
+    register_system_libs(*this);
 }
 
 VM::~VM() {
@@ -1190,6 +1192,16 @@ InterpretResult VM::run() {
                     RETURN_RUNTIME_ERROR;
                 }
                 REFRESH_FRAME();
+            } else if (init_it != methods.end() && init_it->second.is_native()) {
+                // Native init: call with this as first arg
+                auto* init_native = init_it->second.as_native();
+                for (int i = arg_count; i > 0; i--) {
+                    stack_[callee_abs + 1 + i] = stack_[callee_abs + 1 + i - 1];
+                }
+                stack_[callee_abs + 1] = instance_val;
+                stack_top_ += 1;
+                call_native(init_native, arg_count + 1, a, callee_abs);
+                S(a) = instance_val; // init returns `this`
             } else {
                 stack_[callee_abs] = instance_val;
             }
@@ -1280,6 +1292,15 @@ InterpretResult VM::run() {
                 frame->closure = init_closure;
                 ip = init_closure->function->bytecode.data();
                 stack_top_ = base + needed;
+            } else if (init_it != methods.end() && init_it->second.is_native()) {
+                auto* init_native = init_it->second.as_native();
+                for (int i = arg_count; i > 0; i--) {
+                    stack_[callee_abs + 1 + i] = stack_[callee_abs + 1 + i - 1];
+                }
+                stack_[callee_abs + 1] = instance_val;
+                stack_top_ += 1;
+                call_native(init_native, arg_count + 1, a, callee_abs);
+                S(a) = instance_val; // init returns `this`
             }
         } else {
             runtime_error("Tail call target must be a function or class");

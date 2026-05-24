@@ -48,6 +48,7 @@ static int g_failed = 0;
 #include "test_vm.cpp"
 #include "test_native.cpp"
 #include "test_gc.cpp"
+#include "test_system.cpp"
 
 int main() {
     std::cout << "Running Akar Script tests..." << std::endl;
