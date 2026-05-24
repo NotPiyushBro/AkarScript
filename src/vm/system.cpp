@@ -22,8 +22,6 @@
 
 // Native library extensions
 #include "akar/native/ssl.h"
-#include "akar/native/http.h"
-#include <errno.h>
 
 // TCP / sockets
 #include <sys/socket.h>
@@ -96,6 +94,238 @@ static FILE* get_file(Value inst) {
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Embedded Akar HTTP library — written in .ak, auto-loaded at VM init
+//   Uses: substr, split, contains, replace (built-in natives)
+//   Implements: str_find, starts_with, trim (helpers)
+// ---------------------------------------------------------------------------
+
+static const char* http_ak_source = R"akar(fn str_find(haystack, needle) {
+    let hlen = len(haystack)
+    let nlen = len(needle)
+    if (nlen == 0) { return 0 }
+    let i = 0
+    while (i <= hlen - nlen) {
+        if (substr(haystack, i, nlen) == needle) { return i }
+        i = i + 1
+    }
+    return -1
+}
+fn starts_with(str, prefix) {
+    if (len(str) < len(prefix)) { return false }
+    return substr(str, 0, len(prefix)) == prefix
+}
+fn trim(str) {
+    let start = 0
+    let slen = len(str)
+    while (start < slen) {
+        let c = str[start]
+        if (c != " " and c != "\t" and c != "\r" and c != "\n") { break }
+        start = start + 1
+    }
+    let end = slen - 1
+    while (end >= start) {
+        let c = str[end]
+        if (c != " " and c != "\t" and c != "\r" and c != "\n") { break }
+        end = end - 1
+    }
+    if (end < start) { return "" }
+    return substr(str, start, end - start + 1)
+}
+fn hex_val(c) {
+    if (c == "0") { return 0 }
+    if (c == "1") { return 1 }
+    if (c == "2") { return 2 }
+    if (c == "3") { return 3 }
+    if (c == "4") { return 4 }
+    if (c == "5") { return 5 }
+    if (c == "6") { return 6 }
+    if (c == "7") { return 7 }
+    if (c == "8") { return 8 }
+    if (c == "9") { return 9 }
+    if (c == "a" or c == "A") { return 10 }
+    if (c == "b" or c == "B") { return 11 }
+    if (c == "c" or c == "C") { return 12 }
+    if (c == "d" or c == "D") { return 13 }
+    if (c == "e" or c == "E") { return 14 }
+    if (c == "f" or c == "F") { return 15 }
+    return -1
+}
+fn parse_hex(s) {
+    let result = 0
+    let i = 0
+    s = trim(s)
+    while (i < len(s)) {
+        let d = hex_val(s[i])
+        if (d < 0) { break }
+        result = result * 16 + d
+        i = i + 1
+    }
+    return result
+}
+fn decode_chunked(data) {
+    let result = ""
+    let pos = 0
+    let dlen = len(data)
+    while (pos < dlen) {
+        let remaining = substr(data, pos, dlen - pos)
+        let line_end = str_find(remaining, "\r\n")
+        let nl_len = 2
+        if (line_end < 0) {
+            line_end = str_find(remaining, "\n")
+            nl_len = 1
+        }
+        if (line_end < 0) { break }
+        let chunk_size = parse_hex(substr(data, pos, line_end))
+        if (chunk_size <= 0) { break }
+        pos = pos + line_end + nl_len
+        if (pos + chunk_size <= dlen) {
+            result = result + substr(data, pos, chunk_size)
+        }
+        pos = pos + chunk_size
+        if (pos + 2 <= dlen and substr(data, pos, 2) == "\r\n") {
+            pos = pos + 2
+        } else if (pos < dlen and substr(data, pos, 1) == "\n") {
+            pos = pos + 1
+        }
+    }
+    return result
+}
+fn parse_url(url) {
+    let scheme = "http"
+    let host = ""
+    let port = 80
+    let path = "/"
+    if (starts_with(url, "https://")) {
+        scheme = "https"
+        port = 443
+        url = substr(url, 8, len(url) - 8)
+    } else if (starts_with(url, "http://")) {
+        url = substr(url, 7, len(url) - 7)
+    }
+    let slash = str_find(url, "/")
+    let host_port = ""
+    if (slash >= 0) {
+        host_port = substr(url, 0, slash)
+        path = substr(url, slash, len(url) - slash)
+    } else {
+        host_port = url
+    }
+    let colon = str_find(host_port, ":")
+    if (colon >= 0) {
+        host = substr(host_port, 0, colon)
+        let port_str = substr(host_port, colon + 1, len(host_port) - colon - 1)
+        let p = to_number(port_str)
+        if (p != nil and p > 0) { port = p }
+    } else {
+        host = host_port
+    }
+    return {"scheme": scheme, "host": host, "port": port, "path": path}
+}
+fn parse_response(raw) {
+    let resp = {"status": 0, "status_text": "", "headers": {}, "body": ""}
+    let sep = str_find(raw, "\r\n\r\n")
+    let hdr_part = ""
+    if (sep >= 0) {
+        hdr_part = substr(raw, 0, sep)
+        resp.body = substr(raw, sep + 4, len(raw) - sep - 4)
+    } else {
+        sep = str_find(raw, "\n\n")
+        if (sep >= 0) {
+            hdr_part = substr(raw, 0, sep)
+            resp.body = substr(raw, sep + 2, len(raw) - sep - 2)
+        } else {
+            resp.body = raw
+            return resp
+        }
+    }
+    let lines = split(hdr_part, "\r\n")
+    if (len(lines) == 0) { lines = split(hdr_part, "\n") }
+    if (len(lines) > 0) {
+        let parts = split(lines[0], " ")
+        if (len(parts) >= 2) {
+            let s = to_number(parts[1])
+            if (s != nil) { resp.status = s }
+        }
+        if (len(parts) >= 3) {
+            resp.status_text = parts[2]
+            let j = 3
+            while (j < len(parts)) {
+                resp.status_text = resp.status_text + " " + parts[j]
+                j = j + 1
+            }
+        }
+    }
+    let i = 1
+    while (i < len(lines)) {
+        let line = lines[i]
+        let cp = str_find(line, ":")
+        if (cp > 0) {
+            let key = trim(substr(line, 0, cp))
+            let val = trim(substr(line, cp + 1, len(line) - cp - 1))
+            resp.headers[key] = val
+        }
+        i = i + 1
+    }
+    let te = ""
+    if (resp.headers["Transfer-Encoding"] != nil) { te = resp.headers["Transfer-Encoding"] }
+    if (contains(te, "chunked")) { resp.body = decode_chunked(resp.body) }
+    return resp
+}
+fn http_request(method, url, body, headers) {
+    let u = parse_url(url)
+    let use_ssl = (u.scheme == "https")
+    let sock = nil
+    if (use_ssl) {
+        sock = net.ssl_connect(u.host, u.port)
+    } else {
+        sock = net.connect(u.host, u.port)
+    }
+    if (sock == nil) { return nil }
+    let req = method + " " + u.path + " HTTP/1.1\r\n"
+    req = req + "Host: " + u.host + "\r\n"
+    req = req + "Connection: close\r\n"
+    req = req + "User-Agent: AkarScript/1.0\r\n"
+    let body_str = ""
+    if (body != nil) { body_str = to_string(body) }
+    if (len(body_str) > 0) {
+        req = req + "Content-Length: " + to_string(len(body_str)) + "\r\n"
+    }
+    if (headers != nil) {
+        let hdrs = keys(headers)
+        let hi = 0
+        while (hi < len(hdrs)) {
+            let key = hdrs[hi]
+            req = req + key + ": " + to_string(headers[key]) + "\r\n"
+            hi = hi + 1
+        }
+    }
+    req = req + "\r\n"
+    if (len(body_str) > 0) { req = req + body_str }
+    sock.send(req)
+    let raw = ""
+    let empties = 0
+    while (empties < 3) {
+        let chunk = sock.recv(4096, 3000)
+        if (chunk == nil or len(chunk) == 0) {
+            empties = empties + 1
+        } else {
+            raw = raw + chunk
+            empties = 0
+        }
+    }
+    sock.close()
+    if (len(raw) == 0) { return nil }
+    return parse_response(raw)
+}
+fn http_get(url, headers) { return http_request("GET", url, nil, headers) }
+fn http_post(url, body, headers) { return http_request("POST", url, body, headers) }
+fn http_put(url, body, headers) { return http_request("PUT", url, body, headers) }
+fn http_patch(url, body, headers) { return http_request("PATCH", url, body, headers) }
+fn http_delete(url, headers) { return http_request("DELETE", url, nil, headers) }
+fn http_head(url, headers) { return http_request("HEAD", url, nil, headers) }
+)akar";
 
 void register_system_libs(VM& vm) {
 
@@ -744,7 +974,9 @@ void register_system_libs(VM& vm) {
 
     // Register native library extensions
     register_ssl_native(vm, net);
-    register_http_native(vm);
+
+    // Load the Akar HTTP/HTTPS library (written in .ak, embedded above)
+    vm.interpret(http_ak_source);
 }
 
 } // namespace akar
