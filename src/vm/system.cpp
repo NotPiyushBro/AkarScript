@@ -19,6 +19,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
+
+// Native library extensions
+#include "akar/native/ssl.h"
+#include "akar/native/http.h"
 #include <errno.h>
 
 // TCP / sockets
@@ -737,6 +741,10 @@ void register_system_libs(VM& vm) {
     });
 
     vm.set_global("net", Value(static_cast<Obj*>(net)));
+
+    // Register native library extensions
+    register_ssl_native(vm, net);
+    register_http_native(vm);
 }
 
 } // namespace akar

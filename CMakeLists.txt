@@ -20,6 +20,8 @@ add_library(akar_core STATIC
     src/vm/vm.cpp
     src/vm/native.cpp
     src/vm/system.cpp
+    src/native/ssl.cpp
+    src/native/http.cpp
     src/vm/object_file.cpp
     src/vm/gc.cpp
     src/vm/profiler.cpp
