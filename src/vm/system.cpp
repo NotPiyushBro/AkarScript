@@ -509,7 +509,7 @@ void register_system_libs(VM& vm) {
 
     mod_put(sys, "exec", [](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_string()) return Value();
-        std::string cmd = argv[0].as_string()->value + " 2>&1";
+        std::string cmd = argv[0].as_string()->value;
         FILE* pipe = popen(cmd.c_str(), "r");
         if (!pipe) return Value();
         auto* m = allocate_map();
@@ -519,14 +519,24 @@ void register_system_libs(VM& vm) {
         int rc = pclose(pipe);
         m->entries["stdout"] = Value(static_cast<Obj*>(get_string_table().intern(oss.str())));
         m->entries["stderr"] = Value(static_cast<Obj*>(get_string_table().intern(std::string())));
-        m->entries["exit_code"] = Value(static_cast<double>(WEXITSTATUS(rc)));
+        if (WIFEXITED(rc)) {
+            m->entries["exit_code"] = Value(static_cast<double>(WEXITSTATUS(rc)));
+        } else if (WIFSIGNALED(rc)) {
+            m->entries["exit_code"] = Value(static_cast<double>(-WTERMSIG(rc)));
+        } else {
+            m->entries["exit_code"] = Value(static_cast<double>(rc == -1 ? -1 : 1));
+        }
         return Value(static_cast<Obj*>(m));
     });
 
     mod_put(sys, "exec2", [](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_string()) return Value();
         std::string cmd = argv[0].as_string()->value;
-        std::string tmp = "/tmp/akar_exec_" + std::to_string(getpid()) + "_" + std::to_string(clock());
+        char tmp_tpl[] = "/tmp/akar_exec_XXXXXX";
+        int tmp_fd = mkstemp(tmp_tpl);
+        if (tmp_fd < 0) return Value();
+        close(tmp_fd);  // We only need the unique name
+        std::string tmp(tmp_tpl);
         std::string full_cmd = cmd + " >" + tmp + ".out 2>" + tmp + ".err";
         int rc = system(full_cmd.c_str());
         auto slurp = [&](const std::string& p) -> std::string {
@@ -537,7 +547,13 @@ void register_system_libs(VM& vm) {
         auto* m = allocate_map();
         m->entries["stdout"] = Value(static_cast<Obj*>(get_string_table().intern(slurp(tmp + ".out"))));
         m->entries["stderr"] = Value(static_cast<Obj*>(get_string_table().intern(slurp(tmp + ".err"))));
-        m->entries["exit_code"] = Value(static_cast<double>(WEXITSTATUS(rc)));
+        if (WIFEXITED(rc)) {
+            m->entries["exit_code"] = Value(static_cast<double>(WEXITSTATUS(rc)));
+        } else if (WIFSIGNALED(rc)) {
+            m->entries["exit_code"] = Value(static_cast<double>(-WTERMSIG(rc)));
+        } else {
+            m->entries["exit_code"] = Value(static_cast<double>(rc == -1 ? -1 : 1));
+        }
         unlink((tmp + ".out").c_str());
         unlink((tmp + ".err").c_str());
         return Value(static_cast<Obj*>(m));

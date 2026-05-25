@@ -14,6 +14,7 @@ struct SslHandle {
     int pid = -1;
     int write_fd = -1;
     int read_fd = -1;
+    std::string pending_data;  // Data read during handshake (returned on first recv)
     bool valid() const { return pid > 0 && write_fd >= 0 && read_fd >= 0; }
 };
 
@@ -21,9 +22,9 @@ struct SslHandle {
 bool ssl_available();
 SslHandle ssl_connect_raw(const std::string& host, int port);
 int ssl_send_raw(const SslHandle& h, const std::string& data);
-std::string ssl_recv_raw(const SslHandle& h, int max_bytes = 4096, int timeout_ms = 10000);
-std::string ssl_recv_until(const SslHandle& h, const std::string& delim, int timeout_ms = 10000, int max_bytes = 65536);
-std::string ssl_recv_all(const SslHandle& h, int timeout_ms = 10000, int max_bytes = 65536);
+std::string ssl_recv_raw(SslHandle& h, int max_bytes = 4096, int timeout_ms = 10000);
+std::string ssl_recv_until(SslHandle& h, const std::string& delim, int timeout_ms = 10000, int max_bytes = 65536);
+std::string ssl_recv_all(SslHandle& h, int timeout_ms = 10000, int max_bytes = 65536);
 void ssl_close_raw(SslHandle& h);
 
 // Register SSL natives (adds to existing net module)

@@ -1793,9 +1793,31 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
         if (target >= len || target == next) continue;
         // Only eliminate if jumping backwards (loop)
         if (jmp_offset >= 0) continue;
+        // Only eliminate if the target opcode WRITES to its first operand
+        // Opcodes that read from operand A (not safe to eliminate):
+        //   SET_LOCAL, SET_UPVALUE, SET_GLOBAL, SET_INDEX, SET_FIELD,
+        //   PRINT, RETURN, JMP_IF_FALSE, JMP_IF_TRUE, THROW, CLOSE_UPVALUE
         uint8_t target_op = bytecode[target];
-        // Check if the target instruction writes to the same register
-        if (bytecode[target + 1] == move_dest) {
+        bool target_writes_a = true;
+        switch (static_cast<Opcode>(target_op)) {
+            case Opcode::SET_LOCAL:
+            case Opcode::SET_UPVALUE:
+            case Opcode::SET_GLOBAL:
+            case Opcode::SET_INDEX:
+            case Opcode::SET_FIELD:
+            case Opcode::PRINT:
+            case Opcode::RETURN:
+            case Opcode::JMP_IF_FALSE:
+            case Opcode::JMP_IF_TRUE:
+            case Opcode::JMP:
+            case Opcode::THROW:
+            case Opcode::CLOSE_UPVALUE:
+                target_writes_a = false;
+                break;
+            default:
+                break;
+        }
+        if (target_writes_a && bytecode[target + 1] == move_dest) {
             // Target instruction writes to move_dest — MOVE is dead
             bytecode[i] = op_byte(Opcode::NOP);
         }

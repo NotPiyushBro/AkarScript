@@ -23,6 +23,12 @@ static void track_alloc(size_t bytes) {
 
 size_t get_allocated_bytes() { return g_allocated_bytes; }
 void reset_allocated_bytes() { g_allocated_bytes = 0; }
+
+void gc_track_growth(Obj* obj, size_t additional_bytes) {
+    if (!obj) return;
+    g_allocated_bytes += additional_bytes;
+    obj->alloc_size += additional_bytes;
+}
 size_t get_memory_limit() { return g_memory_limit; }
 void set_memory_limit(size_t limit) { g_memory_limit = limit; }
 

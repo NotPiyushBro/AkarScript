@@ -129,7 +129,7 @@ SslHandle ssl_connect_raw(const std::string& host, int port) {
 
     int ready = select(h.read_fd + 1, &fds, NULL, NULL, &tv);
     if (ready > 0) {
-        // Some data available - could be handshake error output
+        // Some data available - could be handshake error output or server greeting
         char buf[1024];
         ssize_t n = read(h.read_fd, buf, sizeof(buf));
         if (n <= 0) {
@@ -137,7 +137,8 @@ SslHandle ssl_connect_raw(const std::string& host, int port) {
             ssl_close_raw(h);
             return SslHandle{};
         }
-        // Discard any handshake output (with -quiet there shouldn't be much)
+        // Store any initial data (server greeting, etc.) for first recv
+        h.pending_data.assign(buf, n);
     }
     // If ready == 0 (timeout), the handshake might still be in progress.
     // That's OK - we'll let the caller handle it.
@@ -164,8 +165,15 @@ int ssl_send_raw(const SslHandle& h, const std::string& data) {
     return static_cast<int>(n);
 }
 
-std::string ssl_recv_raw(const SslHandle& h, int max_bytes, int timeout_ms) {
+std::string ssl_recv_raw(SslHandle& h, int max_bytes, int timeout_ms) {
     if (!h.valid()) return "";
+
+    // Return any pending data from handshake first
+    if (!h.pending_data.empty()) {
+        std::string result = h.pending_data.substr(0, max_bytes);
+        h.pending_data.erase(0, result.size());
+        return result;
+    }
 
     fd_set fds;
     struct timeval tv;
@@ -182,7 +190,7 @@ std::string ssl_recv_raw(const SslHandle& h, int max_bytes, int timeout_ms) {
     return std::string(buf.data(), n);
 }
 
-std::string ssl_recv_until(const SslHandle& h, const std::string& delim,
+std::string ssl_recv_until(SslHandle& h, const std::string& delim,
                            int timeout_ms, int max_bytes) {
     if (!h.valid()) return "";
     std::string accumulated;
@@ -195,7 +203,7 @@ std::string ssl_recv_until(const SslHandle& h, const std::string& delim,
     return accumulated;
 }
 
-std::string ssl_recv_all(const SslHandle& h, int timeout_ms, int max_bytes) {
+std::string ssl_recv_all(SslHandle& h, int timeout_ms, int max_bytes) {
     if (!h.valid()) return "";
     std::string accumulated;
     while (static_cast<int>(accumulated.size()) < max_bytes) {
@@ -219,7 +227,14 @@ void ssl_close_raw(SslHandle& h) {
     if (h.pid > 0) {
         kill(h.pid, SIGTERM);
         int status;
-        waitpid(h.pid, &status, 0);
+        // Wait briefly, then force kill if still alive
+        struct timespec ts = {0, 100000000}; // 100ms
+        nanosleep(&ts, nullptr);
+        pid_t result = waitpid(h.pid, &status, WNOHANG);
+        if (result == 0) {
+            kill(h.pid, SIGKILL);
+            waitpid(h.pid, &status, 0);
+        }
         h.pid = -1;
     }
 }

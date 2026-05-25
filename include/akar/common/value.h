@@ -380,6 +380,7 @@ StringTable& get_string_table();
 // Memory tracking
 size_t get_allocated_bytes();
 void reset_allocated_bytes();
+void gc_track_growth(Obj* obj, size_t additional_bytes);
 void free_all_objects();
 bool memory_limit_exceeded();
 void set_memory_limit(size_t limit);

@@ -112,7 +112,13 @@ void register_builtins(VM& vm) {
     // push(array, value)
     vm.define_native("push", [](int argc, Value* argv) -> Value {
         if (argc != 2 || !argv[0].is_array()) return Value();
-        argv[0].as_array()->elements.push_back(argv[1]);
+        if (gc_is_marking()) gc_mark_value(argv[1]);
+        auto* arr = argv[0].as_array();
+        size_t old_cap = arr->elements.capacity();
+        arr->elements.push_back(argv[1]);
+        if (arr->elements.capacity() > old_cap) {
+            gc_track_growth(static_cast<Obj*>(arr), (arr->elements.capacity() - old_cap) * sizeof(Value));
+        }
         return argv[0];
     });
 
@@ -180,11 +186,17 @@ void register_builtins(VM& vm) {
     vm.define_native("slice", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_number()) return Value();
         auto& elems = argv[0].as_array()->elements;
+        int size = static_cast<int>(elems.size());
         int start = safe_int(argv[1].get_number());
-        int end = static_cast<int>(elems.size());
+        int end = size;
         if (argc >= 3 && argv[2].is_number()) end = safe_int(argv[2].get_number());
+        // Support negative indices (Python-style)
+        if (start < 0) start += size;
         if (start < 0) start = 0;
-        if (end > static_cast<int>(elems.size())) end = static_cast<int>(elems.size());
+        if (end < 0) end += size;
+        if (end < 0) end = 0;
+        if (start > size) start = size;
+        if (end > size) end = size;
         if (start > end) start = end;
         auto* result = allocate_array();
         for (int i = start; i < end; i++) {
@@ -208,7 +220,19 @@ void register_builtins(VM& vm) {
         std::sort(elems.begin(), elems.end(), [](const Value& a, const Value& b) {
             if (a.is_number() && b.is_number()) return a.get_number() < b.get_number();
             if (a.is_string() && b.is_string()) return a.as_string()->value < b.as_string()->value;
-            return false;
+            // Total ordering for mixed types: nil < bool < number < string < obj
+            auto type_rank = [](const Value& v) -> int {
+                if (v.is_nil()) return 0;
+                if (v.is_bool()) return 1;
+                if (v.is_number()) return 2;
+                if (v.is_string()) return 3;
+                return 4;
+            };
+            int ra = type_rank(a);
+            int rb = type_rank(b);
+            if (ra != rb) return ra < rb;
+            // Same rank but different subtype — compare by pointer
+            return a.bits < b.bits;
         });
         return argv[0];
     });

@@ -2159,13 +2159,22 @@ InterpretResult VM::run() {
                 Value obj = S(wa);
                 Value idx = S(wb);
                 Value val = S(wc);
+                // GC write barrier: mark stored value if GC is marking
+                if (gc_is_marking()) gc_mark_value(val);
                 if (obj.is_array()) {
                     if (!idx.is_number()) { runtime_error("Array index must be a number"); RETURN_RUNTIME_ERROR; }
                     auto& elems = obj.as_array()->elements;
                     int i = static_cast<int>(idx.get_number());
                     if (i < 0) i += (int)elems.size();
                     if (i < 0) { runtime_error("Array index out of bounds"); RETURN_RUNTIME_ERROR; }
-                    if (i >= (int)elems.size()) elems.resize(i + 1);
+                    if (i >= (int)elems.size()) {
+                        if (i > 10000000) { runtime_error("Array index too large (max 10M)"); RETURN_RUNTIME_ERROR; }
+                        size_t old_cap = elems.capacity();
+                        elems.resize(i + 1);
+                        if (elems.capacity() > old_cap) {
+                            gc_track_growth(static_cast<Obj*>(obj.as_array()), (elems.capacity() - old_cap) * sizeof(Value));
+                        }
+                    }
                     elems[i] = val;
                 } else if (obj.is_map()) {
                     if (!idx.is_string()) { runtime_error("Map key must be a string"); RETURN_RUNTIME_ERROR; }
@@ -2226,6 +2235,8 @@ InterpretResult VM::run() {
                     RETURN_RUNTIME_ERROR;
                 }
                 std::string field = constants[wb].as_string()->value;
+                // GC write barrier: mark stored value if GC is marking
+                if (gc_is_marking()) gc_mark_value(S(wc));
                 if (obj.is_instance()) {
                     obj.as_instance()->fields[field] = S(wc);
                 } else if (obj.is_class()) {
