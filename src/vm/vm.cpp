@@ -95,6 +95,10 @@ void VM::mark_roots() {
     for (auto* eff : effect_queue_) {
         gc_mark_object(static_cast<Obj*>(eff));
     }
+    // Mark @export signals so they survive GC
+    for (auto& entry : get_export_registry()) {
+        gc_mark_object(static_cast<Obj*>(entry.signal));
+    }
 }
 
 void VM::collect_garbage() {
@@ -2112,6 +2116,24 @@ InterpretResult VM::run() {
                 int callee_pos = frame->callee_stack_pos;
                 int saved_top = frame->caller_stack_top;
                 frame_count_--;
+                // Clear effect context only when returning from the effect's own frame
+                if (current_effect_ != nullptr && frame_count_ < effect_frame_depth_) {
+                    current_effect_->state = ObjEffect::State::Idle;
+                    if (current_effect_->dirty) {
+                        current_effect_->dirty = false;
+                        current_effect_->consecutive_reruns++;
+                        if (current_effect_->consecutive_reruns <= ObjEffect::MAX_RERUNS) {
+                            current_effect_->last_queued_gen = write_generation_;
+                            current_effect_->state = ObjEffect::State::Queued;
+                            effect_queue_.push_back(current_effect_);
+                        } else {
+                            current_effect_->consecutive_reruns = 0;
+                        }
+                    } else {
+                        current_effect_->consecutive_reruns = 0;
+                    }
+                    current_effect_ = nullptr;
+                }
                 if (frame_count_ == 0) {
                     stack_top_ = 0;
                     stack_[stack_top_++] = result;
@@ -2124,6 +2146,7 @@ InterpretResult VM::run() {
                 stack_top_ = std::max(saved_top, callee_pos + 1);
                 stack_[callee_pos] = result;
                 REFRESH_FRAME();
+                if (!effect_queue_.empty()) goto loop_continue;
                 break;
             }
             case Opcode::JMP: {
@@ -2416,6 +2439,10 @@ InterpretResult VM::run() {
                     skip_native_call_ = false;
                     S(wa) = skip_native_result_;
                     break;
+                }
+                if (!active_fiber_) {
+                    runtime_error("Cannot yield outside a fiber");
+                    RETURN_RUNTIME_ERROR;
                 }
                 yield_pending_ = true;
                 yield_value_ = S(wa);
@@ -2831,6 +2858,68 @@ InterpretResult VM::run() {
                 } else { runtime_error("Operands must be numbers (shift right)"); RETURN_RUNTIME_ERROR; }
                 break;
             }
+            // Signal & Effect opcodes (WIDE)
+            case Opcode::SIGNAL_CREATE: {
+                auto* sig = allocate_signal(S(wb), "signal");
+                S(wa) = Value(static_cast<Obj*>(sig));
+                break;
+            }
+            case Opcode::SIGNAL_GET: {
+                Value sig_val = S(wb);
+                if (!sig_val.is_signal()) { runtime_error("SIGNAL_GET: not a signal"); RETURN_RUNTIME_ERROR; }
+                auto* sig = sig_val.as_signal();
+                if (sig->native_getter) { S(wa) = Value(sig->native_getter(sig->export_userdata)); }
+                else { S(wa) = sig->value; }
+                if (current_effect_ && !current_effect_->dependencies.contains(sig)) {
+                    current_effect_->dependencies.push_back(sig);
+                    sig->subscribers.push_back(current_effect_);
+                }
+                break;
+            }
+            case Opcode::SIGNAL_SET: {
+                Value sig_val = S(wa);
+                if (!sig_val.is_signal()) { runtime_error("SIGNAL_SET: not a signal"); RETURN_RUNTIME_ERROR; }
+                auto* sig = sig_val.as_signal();
+                if (sig->native_setter) { Value nv = S(wb); sig->native_setter(sig->export_userdata, nv.is_number() ? nv.get_number() : 0.0); }
+                sig->value = S(wb);
+                sig->write_generation = ++write_generation_;
+                { uint32_t gen = sig->write_generation; for (auto* eff : sig->subscribers) { if (eff->last_queued_gen != gen && eff->body) { if (eff->state == ObjEffect::State::Running) { eff->dirty = true; } else { eff->last_queued_gen = gen; eff->state = ObjEffect::State::Queued; eff->consecutive_reruns = 0; effect_queue_.push_back(eff); } } } }
+                break;
+            }
+            case Opcode::EFFECT_CREATE: {
+                Value closure_val = S(wb);
+                if (!closure_val.is_closure()) { runtime_error("EFFECT_CREATE: body must be a closure"); RETURN_RUNTIME_ERROR; }
+                auto* eff = allocate_effect(closure_val.as_closure(), "effect");
+                S(wa) = Value(static_cast<Obj*>(eff));
+                break;
+            }
+            case Opcode::EFFECT_RUN: {
+                Value eff_val = S(wa);
+                if (!eff_val.is_effect()) { runtime_error("EFFECT_RUN: not an effect"); RETURN_RUNTIME_ERROR; }
+                auto* eff = eff_val.as_effect();
+                if (!eff->body) break;
+                for (auto* old_sig : eff->dependencies) { old_sig->subscribers.erase(eff); }
+                eff->dependencies.clear(); eff->state = ObjEffect::State::Running;
+                current_effect_ = eff; effect_frame_depth_ = frame_count_ + 1;
+                frame->ip = ip; int save_top = stack_top_;
+                if (stack_top_ >= MAX_STACK) { current_effect_ = nullptr; RETURN_RUNTIME_ERROR; }
+                stack_[stack_top_++] = Value(static_cast<Obj*>(eff->body));
+                if (!call(eff->body, 0, save_top, save_top)) { current_effect_ = nullptr; RETURN_RUNTIME_ERROR; }
+                REFRESH_FRAME();
+                break;
+            }
+            case Opcode::EXPORT_REGISTER: {
+                Value sig_val = S(wa);
+                if (sig_val.is_signal()) {
+                    uint16_t idx = (wb << 8) | wc;
+                    auto& constants = frame->closure->function->constants;
+                    if (idx < constants.size() && constants[idx].is_string()) {
+                        get_export_registry().push_back({constants[idx].as_string()->value, sig_val.as_signal()});
+                    }
+                }
+                break;
+            }
+            case Opcode::INVOKE: { runtime_error("INVOKE not fully implemented"); RETURN_RUNTIME_ERROR; }
             default:
                 runtime_error("Opcode %d cannot be used with WIDE prefix", wide_op);
                 RETURN_RUNTIME_ERROR;
