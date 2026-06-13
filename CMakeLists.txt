@@ -66,6 +66,6 @@ target_link_libraries(embed_demo PRIVATE akar_api)
 # Tests
 enable_testing()
 add_executable(akar_tests tests/test_main.cpp)
-target_link_libraries(akar_tests PRIVATE akar_core)
+target_link_libraries(akar_tests PRIVATE akar_api)
 target_include_directories(akar_tests PRIVATE include)
 add_test(NAME akar_tests COMMAND akar_tests)

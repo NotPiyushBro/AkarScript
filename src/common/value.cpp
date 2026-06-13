@@ -9,6 +9,7 @@ static StringTable g_string_table;
 static size_t g_allocated_bytes = 0;
 static size_t g_memory_limit = 256 * 1024 * 1024; // 256 MB default
 static size_t g_next_gc = 1024;
+static std::vector<ExportEntry> g_export_registry;
 static std::vector<Obj*> g_gray_stack;
 // Write barrier: when true, newly allocated objects are immediately marked
 // to prevent the incremental GC from sweeping them before they're traced.
@@ -50,6 +51,7 @@ void free_all_objects() {
     g_objects = nullptr;
     g_allocated_bytes = 0;
     g_gray_stack.clear();
+    g_export_registry.clear();
     // Also clear string table so it doesn't hold dangling pointers
     g_string_table = StringTable();
 }
@@ -553,6 +555,11 @@ std::string Value::to_string() const {
         }
     }
     return "<unknown>";
+}
+
+// Export registry
+std::vector<ExportEntry>& get_export_registry() {
+    return g_export_registry;
 }
 
 } // namespace akar

@@ -338,6 +338,33 @@ void akar_push_interned(akar_VM* vm, const char* str);
 #include <string>
 #include <utility>
 
+// ─────────────────────────────────────────────────────────────
+// @export variables (C++ only — defined in akar_api.cpp)
+// ─────────────────────────────────────────────────────────────
+
+// Forward declare Value (defined in akar/common/value.h)
+namespace akar { struct Value; }
+
+// Callback types for export getter/setter
+// getter: called when script reads the variable. Returns the current value as double.
+// setter: called when script writes the variable. The new value is new_value as double.
+typedef double (*akar_ExportGetter)(void* userdata);
+typedef void   (*akar_ExportSetter)(void* userdata, double new_value);
+
+// Register getter/setter callbacks for an @export variable.
+// The variable must already exist as a global (created by @export in script).
+// getter and/or setter can be NULL for one-directional interception.
+void akar_export_var(akar_VM* vm, const char* name,
+                     akar_ExportGetter getter,
+                     akar_ExportSetter setter,
+                     void* userdata);
+
+// Enumerate all @export variables
+int akar_export_count(akar_VM* vm);
+
+// Get the name of the i-th exported variable
+const char* akar_export_name(akar_VM* vm, int index);
+
 // ═════════════════════════════════════════════════════════════
 // C++ RAII Wrapper (in akar_api namespace to avoid conflict)
 // ═════════════════════════════════════════════════════════════
@@ -402,6 +429,13 @@ public:
     // ── Globals ──
     void set_global(const char* name) { akar_set_global(vm_, name); }
     akar_Type get_global(const char* name) { return akar_get_global(vm_, name); }
+
+    // ── @export ──
+    void export_var(const char* name, akar_ExportGetter getter, akar_ExportSetter setter, void* userdata) {
+        akar_export_var(vm_, name, getter, setter, userdata);
+    }
+    int export_count() { return akar_export_count(vm_); }
+    const char* export_name(int index) { return akar_export_name(vm_, index); }
 
     // ── Function calls ──
     int call(const char* name, int nargs) { return akar_call(vm_, name, nargs); }

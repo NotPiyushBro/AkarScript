@@ -16,6 +16,12 @@ namespace akar {
 std::unordered_set<VM*> VM::active_vms_;
 
 VM::VM() {
+    // WARNING: Only one VM should be active per process. The GC and allocator
+    // use shared global state that is not thread-safe. See vm.h for details.
+    if (active_vms_.size() >= 1) {
+        fprintf(stderr, "WARNING: Multiple VM instances detected. "
+                        "The Akar VM is not thread-safe — use one VM per process.\n");
+    }
     stack_top_ = 0;
     frame_count_ = 0;
     open_upvalues_ = nullptr;
@@ -77,6 +83,10 @@ void VM::mark_roots() {
     }
     if (resume_fiber_) {
         gc_mark_object(static_cast<Obj*>(resume_fiber_));
+    }
+    // Mark external fibers (created via API, not yet on VM stack)
+    for (auto* f : external_fibers_) {
+        gc_mark_object(static_cast<Obj*>(f));
     }
     // Mark signal/effect tracking
     if (current_effect_) {
@@ -215,6 +225,7 @@ InterpretResult VM::interpret(const std::string& source) {
 
 InterpretResult VM::run_function(ObjFunction* function) {
     auto* closure = allocate_closure(function);
+    if (stack_top_ >= MAX_STACK) { runtime_error("Stack overflow"); return InterpretResult::RuntimeError; }
     stack_[stack_top_++] = Value(static_cast<Obj*>(closure));
 
     if (!call(closure, 0, 0, 0)) {
@@ -350,6 +361,7 @@ InterpretResult VM::run() {
         // Signal & Effect
         &&op_SIGNAL_CREATE, &&op_SIGNAL_GET, &&op_SIGNAL_SET,
         &&op_EFFECT_CREATE, &&op_EFFECT_RUN,
+        &&op_EXPORT_REGISTER,
         // Enum
         &&op_ENUM_CREATE, &&op_ENUM_VARIANT, &&op_ENUM_DATA_VARIANT,
         &&op_ENUM_GET, &&op_ENUM_IS,
@@ -425,6 +437,7 @@ InterpretResult VM::run() {
             effect_frame_depth_ = frame_count_ + 1;
             frame->ip = ip;
             int save_top = stack_top_;
+            if (stack_top_ >= MAX_STACK) { current_effect_ = nullptr; eff->state = ObjEffect::State::Idle; runtime_error("Stack overflow in effect"); RETURN_RUNTIME_ERROR; }
             stack_[stack_top_++] = Value(static_cast<Obj*>(eff->body));
             int cp = save_top;
             if (!call(eff->body, 0, cp, cp)) {
@@ -623,7 +636,9 @@ InterpretResult VM::run() {
     }
     CASE(MOD_NUM): {
         uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
-        S(a) = Value(std::fmod(S(b).get_number(), S(c).get_number()));
+        double divisor = S(c).get_number();
+        if (__builtin_expect(divisor == 0, 0)) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; }
+        S(a) = Value(std::fmod(S(b).get_number(), divisor));
         DISPATCH();
     }
     CASE(NEG): {
@@ -738,7 +753,9 @@ InterpretResult VM::run() {
     }
     CASE(MOD_EQ_ZERO): {
         uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
-        S(a) = Value(std::fmod(S(b).get_number(), S(c).get_number()) == 0.0);
+        double divisor = S(c).get_number();
+        if (__builtin_expect(divisor == 0, 0)) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; }
+        S(a) = Value(std::fmod(S(b).get_number(), divisor) == 0.0);
         DISPATCH();
     }
     CASE(LOAD_IMM): {
@@ -965,6 +982,7 @@ InterpretResult VM::run() {
                     new_frame->caller_stack_top = stack_top_;
                     new_frame->slots = &stack_[args_abs];
                     int needed = func->register_count;
+                    if (args_abs + needed > MAX_STACK) { frame_count_--; runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
                     static constexpr uint64_t NIL_BITS_JIT = 0x7FFC000000000000ULL;
                     for (int i = arg_count; i < needed; i++) {
                         stack_[args_abs + i].bits = NIL_BITS_JIT;
@@ -1020,6 +1038,7 @@ InterpretResult VM::run() {
                 new_frame->caller_stack_top = stack_top_;
                 new_frame->slots = &stack_[args_abs];
                 int needed = closure->function->register_count;
+                if (args_abs + needed > MAX_STACK) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
                 // Fast nil initialization using direct bit pattern write
                 static constexpr uint64_t NIL_BITS = 0x7FFC000000000000ULL;
                 for (int i = arg_count; i < needed; i++) {
@@ -1148,6 +1167,7 @@ InterpretResult VM::run() {
                     fib->resume_return_reg = resume_return_reg_;
                     active_fiber_ = fib;
                     int callee_abs2 = stack_top_;
+                    if (stack_top_ + 1 + (int)fib->initial_args.size() > MAX_STACK) { active_fiber_ = nullptr; runtime_error("Stack overflow starting fiber"); RETURN_RUNTIME_ERROR; }
                     stack_[stack_top_++] = Value(static_cast<Obj*>(fib->entry));
                     // Use resume value if provided (and non-nil), otherwise use initial_args
                     int arg_count = 0;
@@ -1181,6 +1201,11 @@ InterpretResult VM::run() {
                 int total_args = arg_count + 1;
                 if (total_args != init_closure->function->arity) {
                     runtime_error("Expected %d arguments but got %d", init_closure->function->arity, total_args);
+                    RETURN_RUNTIME_ERROR;
+                }
+                // Bounds check before shifting arguments to make room for 'this'
+                if (callee_abs + 1 + arg_count + 1 > MAX_STACK) {
+                    runtime_error("Stack overflow in constructor call");
                     RETURN_RUNTIME_ERROR;
                 }
                 for (int i = arg_count; i > 0; i--) {
@@ -1232,10 +1257,11 @@ InterpretResult VM::run() {
                 open_upvalues_ = uv->next_upvalue;
             }
             int args_src = callee_abs + 1;
+            int needed = closure->function->register_count;
+            if (base + needed > MAX_STACK) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
             for (int i = 0; i < arg_count; i++) {
                 stack_[base + i] = stack_[args_src + i];
             }
-            int needed = closure->function->register_count;
             for (int i = arg_count; i < needed; i++) {
                 stack_[base + i] = Value();
             }
@@ -1270,6 +1296,7 @@ InterpretResult VM::run() {
                     runtime_error("Expected %d arguments but got %d", init_closure->function->arity, total_args);
                     RETURN_RUNTIME_ERROR;
                 }
+                if (callee_abs + 1 + total_args > MAX_STACK) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
                 for (int i = arg_count; i > 0; i--) {
                     stack_[callee_abs + 1 + i] = stack_[callee_abs + 1 + i - 1];
                 }
@@ -1282,10 +1309,11 @@ InterpretResult VM::run() {
                     open_upvalues_ = uv->next_upvalue;
                 }
                 int args_src = callee_abs + 1;
+                int needed = init_closure->function->register_count;
+                if (base + needed > MAX_STACK) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
                 for (int i = 0; i < total_args; i++) {
                     stack_[base + i] = stack_[args_src + i];
                 }
-                int needed = init_closure->function->register_count;
                 for (int i = total_args; i < needed; i++) {
                     stack_[base + i] = Value();
                 }
@@ -1555,6 +1583,8 @@ InterpretResult VM::run() {
         Value obj = S(a);
         Value idx = S(b);
         Value val = S(c);
+        // GC write barrier: mark stored value if GC is marking
+        if (gc_is_marking()) gc_mark_value(val);
         if (obj.is_array()) {
             if (!idx.is_number()) {
                 runtime_error("Array index must be a number");
@@ -1639,6 +1669,8 @@ InterpretResult VM::run() {
             RETURN_RUNTIME_ERROR;
         }
         const std::string& field = constants[b].as_string()->value;
+        // GC write barrier: mark stored value if GC is marking
+        if (gc_is_marking()) gc_mark_value(S(c));
         if (obj.is_instance()) {
             obj.as_instance()->fields[field] = S(c);
         } else if (obj.is_class()) {
@@ -1898,6 +1930,7 @@ InterpretResult VM::run() {
         fiber->resume_return_reg = a;
         active_fiber_ = fiber;
         int callee_abs = stack_top_;
+        if (stack_top_ + 1 + (int)fiber->initial_args.size() > MAX_STACK) { active_fiber_ = nullptr; runtime_error("Stack overflow resuming fiber"); RETURN_RUNTIME_ERROR; }
         stack_[stack_top_++] = Value(static_cast<Obj*>(fiber->entry));
         // Use resume value if provided
         int arg_count = 0;
@@ -2234,7 +2267,7 @@ InterpretResult VM::run() {
                     runtime_error("Invalid field name");
                     RETURN_RUNTIME_ERROR;
                 }
-                std::string field = constants[wb].as_string()->value;
+                const std::string& field = constants[wb].as_string()->value;
                 // GC write barrier: mark stored value if GC is marking
                 if (gc_is_marking()) gc_mark_value(S(wc));
                 if (obj.is_instance()) {
@@ -2448,6 +2481,7 @@ InterpretResult VM::run() {
                 fiber->resume_return_reg = wa;
                 active_fiber_ = fiber;
                 int callee_abs = stack_top_;
+                if (stack_top_ + 1 + (int)fiber->initial_args.size() > MAX_STACK) { active_fiber_ = nullptr; runtime_error("Stack overflow starting fiber"); RETURN_RUNTIME_ERROR; }
                 stack_[stack_top_++] = Value(static_cast<Obj*>(fiber->entry));
                 int arg_count = 0;
                 if (!resume_val.is_nil()) {
@@ -2484,10 +2518,11 @@ InterpretResult VM::run() {
                         open_upvalues_ = uv->next_upvalue;
                     }
                     int args_src = callee_abs + 1;
+                    int needed = closure->function->register_count;
+                    if (frame->base_register + needed > MAX_STACK) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
                     for (int i = 0; i < arg_count; i++) {
                         stack_[frame->base_register + i] = stack_[args_src + i];
                     }
-                    int needed = closure->function->register_count;
                     for (int i = arg_count; i < needed; i++) {
                         stack_[frame->base_register + i] = Value();
                     }
@@ -2516,12 +2551,24 @@ InterpretResult VM::run() {
                     auto init_it = methods.find("init");
                     if (init_it == methods.end()) init_it = methods.find(akar_hash_symbol("init"));
                     if (init_it != methods.end() && init_it->second.is_closure()) {
-                        for (int i = arg_count; i > 0; i--) {
-                            stack_[callee_abs + 1 + i] = stack_[callee_abs + 1 + i - 1];
-                        }
-                        stack_[callee_abs + 1] = instance_val;
-                        stack_top_ += 1;
                         auto* init_closure = init_it->second.as_closure();
+                        int total_args = arg_count + 1;
+                        // Bounds check before shifting arguments to make room for 'this'
+                        if (callee_abs + 1 + total_args > MAX_STACK) {
+                            runtime_error("Stack overflow in constructor tail call");
+                            RETURN_RUNTIME_ERROR;
+                        }
+                        // Copy args to temp buffer to avoid overlap issues during shift
+                        std::vector<Value> temp_args(total_args);
+                        temp_args[0] = instance_val;
+                        for (int i = 0; i < arg_count; i++) {
+                            temp_args[i + 1] = stack_[callee_abs + 1 + i];
+                        }
+                        // Write back from temp buffer
+                        for (int i = 0; i < total_args; i++) {
+                            stack_[callee_abs + 1 + i] = temp_args[i];
+                        }
+                        stack_top_ += 1;
                         while (open_upvalues_ && open_upvalues_->location >= &stack_[frame->base_register]) {
                             ObjUpvalue* uv = open_upvalues_;
                             uv->closed = *uv->location;
@@ -2529,11 +2576,11 @@ InterpretResult VM::run() {
                             open_upvalues_ = uv->next_upvalue;
                         }
                         int args_src = callee_abs + 1;
-                        int total_args = arg_count + 1;
+                        int needed = init_closure->function->register_count;
+                        if (frame->base_register + needed > MAX_STACK) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
                         for (int i = 0; i < total_args; i++) {
                             stack_[frame->base_register + i] = stack_[args_src + i];
                         }
-                        int needed = init_closure->function->register_count;
                         for (int i = total_args; i < needed; i++) {
                             stack_[frame->base_register + i] = Value();
                         }
@@ -2571,6 +2618,14 @@ InterpretResult VM::run() {
                 if (try_count_ > 0) {
                     TryFrame& tf = try_frames_[--try_count_];
                     while (frame_count_ > tf.frame_count) {
+                        // Close upvalues at this frame's base before unwinding
+                        Value* slot_ptr = &stack_[frames_[frame_count_ - 1].base_register];
+                        while (open_upvalues_ && open_upvalues_->location >= slot_ptr) {
+                            ObjUpvalue* uv = open_upvalues_;
+                            uv->closed = *uv->location;
+                            uv->location = &uv->closed;
+                            open_upvalues_ = uv->next_upvalue;
+                        }
                         frame_count_--;
                     }
                     REFRESH_FRAME();
@@ -2706,25 +2761,25 @@ InterpretResult VM::run() {
             case Opcode::JMP_IF_NOT_LT: {
                 int16_t offset = static_cast<int16_t>(wc);
                 if (!(S(wa).get_number() < S(wb).get_number())) ip += offset;
-                if (offset < 0) { CHECK_MEMORY_LIMIT(); }
+                if (offset < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
                 break;
             }
             case Opcode::JMP_IF_NOT_LTE: {
                 int16_t offset = static_cast<int16_t>(wc);
                 if (!(S(wa).get_number() <= S(wb).get_number())) ip += offset;
-                if (offset < 0) { CHECK_MEMORY_LIMIT(); }
+                if (offset < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
                 break;
             }
             case Opcode::JMP_IF_NOT_GT: {
                 int16_t offset = static_cast<int16_t>(wc);
                 if (!(S(wa).get_number() > S(wb).get_number())) ip += offset;
-                if (offset < 0) { CHECK_MEMORY_LIMIT(); }
+                if (offset < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
                 break;
             }
             case Opcode::JMP_IF_NOT_GTE: {
                 int16_t offset = static_cast<int16_t>(wc);
                 if (!(S(wa).get_number() >= S(wb).get_number())) ip += offset;
-                if (offset < 0) { CHECK_MEMORY_LIMIT(); }
+                if (offset < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
                 break;
             }
             case Opcode::JMP_IF_NOT_EQ: {
@@ -2802,7 +2857,12 @@ InterpretResult VM::run() {
             RETURN_RUNTIME_ERROR;
         }
         auto* sig = sig_val.as_signal();
-        S(a) = sig->value;
+        // @export: call native getter if registered
+        if (sig->native_getter) {
+            S(a) = Value(sig->native_getter(sig->export_userdata));
+        } else {
+            S(a) = sig->value;
+        }
         // Track dependency if inside an effect
         // Uses SmallVec::contains() — fast linear scan for 1-5 deps (inline buffer)
         if (current_effect_ && !current_effect_->dependencies.contains(sig)) {
@@ -2825,6 +2885,11 @@ InterpretResult VM::run() {
             RETURN_RUNTIME_ERROR;
         }
         auto* sig = sig_val.as_signal();
+        // @export: call native setter if registered (before updating value)
+        if (sig->native_setter) {
+            Value new_val = S(b);
+            sig->native_setter(sig->export_userdata, new_val.is_number() ? new_val.get_number() : 0.0);
+        }
         sig->value = S(b);
         // Increment write generation (for effect dedup)
         sig->write_generation = ++write_generation_;
@@ -2899,6 +2964,7 @@ InterpretResult VM::run() {
         VLOG("[EFFECT_RUN] calling effect body, frame_count=%d, stack_top=%d\n", frame_count_, stack_top_);
         frame->ip = ip;
         int save_top = stack_top_;
+        if (stack_top_ >= MAX_STACK) { current_effect_ = nullptr; RETURN_RUNTIME_ERROR; }
         stack_[stack_top_++] = Value(static_cast<Obj*>(eff->body));
         int callee_pos = save_top;
         if (!call(eff->body, 0, callee_pos, callee_pos)) {
@@ -2910,6 +2976,20 @@ InterpretResult VM::run() {
         // The effect body will now execute via DISPATCH (it's the new top frame).
         // When it RETURNs, the RETURN handler will pop the frame and
         // DISPATCH to the next instruction after EFFECT_RUN.
+        DISPATCH();
+    }
+    CASE(EXPORT_REGISTER): {
+        uint8_t a = ip[1];
+        uint16_t bx = (ip[2] << 8) | ip[3];
+        ip += 4;
+        Value sig_val = S(a);
+        if (sig_val.is_signal()) {
+            auto& constants = frame->closure->function->constants;
+            if (bx < constants.size() && constants[bx].is_string()) {
+                std::string name = constants[bx].as_string()->value;
+                get_export_registry().push_back({name, sig_val.as_signal()});
+            }
+        }
         DISPATCH();
     }
 
@@ -3048,25 +3128,408 @@ InterpretResult VM::run() {
     } // end for(;;)
 
 #else
-    // Fallback: switch-based dispatch for non-GCC compilers
+    // Fallback: switch-based dispatch for non-GCC compilers (MSVC, Clang without computed goto)
     for (;;) {
     loop_continue:
         HANDLE_FIBER_YIELD();
         CHECK_MEMORY_LIMIT();
+        // Drain queued effects at each dispatch cycle
+        if (!effect_queue_.empty()) {
+            ObjEffect* eff = effect_queue_.front();
+            effect_queue_.pop_front();
+            eff->state = ObjEffect::State::Running;
+            for (auto* old_sig : eff->dependencies) {
+                old_sig->subscribers.erase(eff);
+            }
+            eff->dependencies.clear();
+            current_effect_ = eff;
+            effect_frame_depth_ = frame_count_ + 1;
+            frame->ip = ip;
+            int save_top = stack_top_;
+            if (stack_top_ >= MAX_STACK) { current_effect_ = nullptr; eff->state = ObjEffect::State::Idle; runtime_error("Stack overflow in effect"); RETURN_RUNTIME_ERROR; }
+            stack_[stack_top_++] = Value(static_cast<Obj*>(eff->body));
+            int cp = save_top;
+            if (!call(eff->body, 0, cp, cp)) {
+                current_effect_ = nullptr;
+                eff->state = ObjEffect::State::Idle;
+                RETURN_RUNTIME_ERROR;
+            }
+            REFRESH_FRAME();
+        }
         uint8_t instruction = ip[0];
         Opcode op = static_cast<Opcode>(instruction);
         switch (op) {
             case Opcode::LOAD_CONST: {
                 uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4;
-                S(a) = frame->closure->function->constants[bx]; break;
+                auto& constants = frame->closure->function->constants;
+                if (bx >= constants.size()) { runtime_error("Invalid constant index"); RETURN_RUNTIME_ERROR; }
+                S(a) = constants[bx]; break;
             }
             case Opcode::LOAD_NIL: { uint8_t a = ip[1]; ip += 4; S(a) = Value(); break; }
             case Opcode::LOAD_TRUE: { uint8_t a = ip[1]; ip += 4; S(a) = Value(true); break; }
             case Opcode::LOAD_FALSE: { uint8_t a = ip[1]; ip += 4; S(a) = Value(false); break; }
             case Opcode::MOVE: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; S(a) = S(b); break; }
+            case Opcode::GET_LOCAL: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; S(a) = stack_[base + b]; break; }
+            case Opcode::SET_LOCAL: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; stack_[base + b] = S(a); break; }
+            case Opcode::GET_UPVALUE: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4;
+                if (b >= frame->closure->upvalues.size()) { runtime_error("Invalid upvalue index"); RETURN_RUNTIME_ERROR; }
+                S(a) = *frame->closure->upvalues[b]->location; break;
+            }
+            case Opcode::SET_UPVALUE: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4;
+                if (b >= frame->closure->upvalues.size()) { runtime_error("Invalid upvalue index"); RETURN_RUNTIME_ERROR; }
+                *frame->closure->upvalues[b]->location = S(a); break;
+            }
+            case Opcode::GET_GLOBAL: {
+                uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4;
+                auto& constants = frame->closure->function->constants;
+                if (bx >= constants.size() || !constants[bx].is_string()) { runtime_error("Invalid global name"); RETURN_RUNTIME_ERROR; }
+                ObjString* name = constants[bx].as_string();
+                auto it = globals_.find(name);
+                if (it == globals_.end()) { runtime_error("Undefined variable '%s'", name->value.c_str()); RETURN_RUNTIME_ERROR; }
+                S(a) = it->second; break;
+            }
+            case Opcode::SET_GLOBAL: {
+                uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4;
+                auto& constants = frame->closure->function->constants;
+                if (bx >= constants.size() || !constants[bx].is_string()) { runtime_error("Invalid global name"); RETURN_RUNTIME_ERROR; }
+                ObjString* name = constants[bx].as_string();
+                globals_[name] = S(a); break;
+            }
+            case Opcode::ADD: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+                Value& rb = S(b); Value& rc = S(c);
+                if (rb.is_number() && rc.is_number()) { S(a) = Value(rb.get_number() + rc.get_number()); }
+                else if (rb.is_string() && rc.is_string()) { auto* result = get_string_table().intern(rb.as_string()->value + rc.as_string()->value); S(a) = Value(static_cast<Obj*>(result)); }
+                else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::SUB: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(rb.get_number() - rc.get_number()); } else { runtime_error("Operands must be two numbers"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::MUL: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(rb.get_number() * rc.get_number()); } else { runtime_error("Operands must be two numbers"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::DIV: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+                Value& rb = S(b); Value& rc = S(c);
+                if (rb.is_number() && rc.is_number()) { double d = rc.get_number(); if (d == 0) { runtime_error("Division by zero"); RETURN_RUNTIME_ERROR; } S(a) = Value(rb.get_number() / d); }
+                else { runtime_error("Operands must be two numbers"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::MOD: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+                Value& rb = S(b); Value& rc = S(c);
+                if (rb.is_number() && rc.is_number()) { double d = rc.get_number(); if (d == 0) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; } S(a) = Value(std::fmod(rb.get_number(), d)); }
+                else { runtime_error("Operands must be two numbers"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::NEG: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; Value& rb = S(b); if (!rb.is_number()) { runtime_error("Operand must be a number"); RETURN_RUNTIME_ERROR; } S(a) = Value(-rb.get_number()); break; }
+            case Opcode::EQ: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b) == S(c)); break; }
+            case Opcode::NEQ: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b) != S(c)); break; }
+            case Opcode::LT: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(rb.get_number() < rc.get_number()); } else if (rb.is_string() && rc.is_string()) { S(a) = Value(rb.as_string()->value < rc.as_string()->value); } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::LTE: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(rb.get_number() <= rc.get_number()); } else if (rb.is_string() && rc.is_string()) { S(a) = Value(rb.as_string()->value <= rc.as_string()->value); } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::GT: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(rb.get_number() > rc.get_number()); } else if (rb.is_string() && rc.is_string()) { S(a) = Value(rb.as_string()->value > rc.as_string()->value); } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::GTE: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(rb.get_number() >= rc.get_number()); } else if (rb.is_string() && rc.is_string()) { S(a) = Value(rb.as_string()->value >= rc.as_string()->value); } else { runtime_error("Operands must be two numbers or two strings"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::NOT: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; S(a) = Value(!S(b).is_truthy()); break; }
+            case Opcode::JMP: { uint16_t bx = (ip[2] << 8) | ip[3]; int16_t offset = static_cast<int16_t>(bx); ip += offset; break; }
+            case Opcode::JMP_IF_FALSE: { uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4; if (!S(a).is_truthy()) { ip += static_cast<int16_t>(bx); } break; }
+            case Opcode::JMP_IF_TRUE: { uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4; if (S(a).is_truthy()) { ip += static_cast<int16_t>(bx); } break; }
+            case Opcode::CALL: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4;
+                int arg_count = b; int callee_abs = base + a;
+                Value callee_val = stack_[callee_abs];
+                if (callee_val.is_closure()) {
+                    if (!call(callee_val.as_closure(), arg_count, a, callee_abs)) { RETURN_RUNTIME_ERROR; }
+                    REFRESH_FRAME();
+                } else if (callee_val.is_native()) {
+                    if (!call_native(callee_val.as_native(), arg_count, a, callee_abs)) { RETURN_RUNTIME_ERROR; }
+                } else { runtime_error("Can only call functions and classes"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::RETURN: {
+                uint8_t a = ip[1]; ip += 4;
+                Value result = S(a);
+                int callee_pos = frame->callee_stack_pos;
+                int saved_top = frame->caller_stack_top;
+                frame_count_--;
+                if (frame_count_ == 0) { stack_top_ = 0; stack_[stack_top_++] = result; return InterpretResult::Ok; }
+                if (active_fiber_ && frame_count_ == active_fiber_->frame_base) { active_fiber_->state = ObjFiber::State::Done; active_fiber_ = active_fiber_->parent; }
+                stack_top_ = std::max(saved_top, callee_pos + 1);
+                stack_[callee_pos] = result;
+                REFRESH_FRAME();
+                break;
+            }
+            case Opcode::CLOSURE: {
+                uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4;
+                auto& constants = frame->closure->function->constants;
+                if (bx >= constants.size() || !constants[bx].is_obj() || constants[bx].as_obj()->type != ObjType::Function) { runtime_error("Invalid closure constant"); RETURN_RUNTIME_ERROR; }
+                auto* func = static_cast<ObjFunction*>(constants[bx].as_obj());
+                auto* closure = allocate_closure(func);
+                for (auto& desc : func->upvalue_descs) {
+                    ObjUpvalue* upvalue = nullptr;
+                    if (desc.is_local) {
+                        Value* local_slot = &stack_[base + desc.index];
+                        ObjUpvalue** pp = &open_upvalues_;
+                        while (*pp && (*pp)->location > local_slot) { pp = &(*pp)->next_upvalue; }
+                        if (*pp && (*pp)->location == local_slot) { upvalue = *pp; }
+                        else { upvalue = allocate_upvalue(local_slot); upvalue->next_upvalue = *pp; *pp = upvalue; }
+                    } else { upvalue = frame->closure->upvalues[desc.index]; }
+                    closure->upvalues.push_back(upvalue);
+                }
+                S(a) = Value(static_cast<Obj*>(closure)); break;
+            }
+            case Opcode::CLOSE_UPVALUE: { uint8_t a = ip[1]; ip += 4; Value* slot_ptr = &stack_[base + a]; while (open_upvalues_ && open_upvalues_->location >= slot_ptr) { ObjUpvalue* uv = open_upvalues_; uv->closed = *uv->location; uv->location = &uv->closed; open_upvalues_ = uv->next_upvalue; } break; }
+            case Opcode::NEW_ARRAY: { uint8_t a = ip[1]; ip += 4; auto* arr = allocate_array(); S(a) = Value(static_cast<Obj*>(arr)); break; }
+            case Opcode::NEW_MAP: { uint8_t a = ip[1]; ip += 4; auto* map = allocate_map(); S(a) = Value(static_cast<Obj*>(map)); break; }
+            case Opcode::GET_INDEX: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+                Value obj = S(b); Value idx = S(c);
+                if (obj.is_array()) {
+                    if (!idx.is_number()) { runtime_error("Array index must be a number"); RETURN_RUNTIME_ERROR; }
+                    auto& elems = obj.as_array()->elements; int i = static_cast<int>(idx.get_number());
+                    if (i < 0) i += (int)elems.size(); if (i < 0 || i >= (int)elems.size()) { runtime_error("Array index out of bounds"); RETURN_RUNTIME_ERROR; }
+                    S(a) = elems[i];
+                } else if (obj.is_map()) {
+                    if (!idx.is_string()) { runtime_error("Map key must be a string"); RETURN_RUNTIME_ERROR; }
+                    auto it = obj.as_map()->entries.find(idx.as_string()->value); S(a) = (it == obj.as_map()->entries.end()) ? Value() : it->second;
+                } else if (obj.is_string()) {
+                    if (!idx.is_number()) { runtime_error("String index must be a number"); RETURN_RUNTIME_ERROR; }
+                    auto& s = obj.as_string()->value; int i = static_cast<int>(idx.get_number());
+                    if (i < 0) i += (int)s.size(); if (i < 0 || i >= (int)s.size()) { runtime_error("String index out of bounds"); RETURN_RUNTIME_ERROR; }
+                    auto* ch = get_string_table().intern(std::string(1, s[i])); S(a) = Value(static_cast<Obj*>(ch));
+                } else { runtime_error("Cannot index this value"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::SET_INDEX: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+                Value obj = S(a); Value idx = S(b); Value val = S(c);
+                if (gc_is_marking()) gc_mark_value(val);
+                if (obj.is_array()) {
+                    if (!idx.is_number()) { runtime_error("Array index must be a number"); RETURN_RUNTIME_ERROR; }
+                    auto& elems = obj.as_array()->elements; int i = static_cast<int>(idx.get_number());
+                    if (i < 0) i += (int)elems.size(); if (i < 0) { runtime_error("Array index out of bounds"); RETURN_RUNTIME_ERROR; }
+                    if (i >= (int)elems.size()) {
+                        size_t old_cap = elems.capacity();
+                        elems.resize(i + 1);
+                        if (elems.capacity() > old_cap) {
+                            gc_track_growth(static_cast<Obj*>(obj.as_array()), (elems.capacity() - old_cap) * sizeof(Value));
+                        }
+                    }
+                    elems[i] = val;
+                } else if (obj.is_map()) {
+                    if (!idx.is_string()) { runtime_error("Map key must be a string"); RETURN_RUNTIME_ERROR; }
+                    obj.as_map()->entries[idx.as_string()->value] = val;
+                } else { runtime_error("Cannot index this value"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::GET_FIELD: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+                Value obj = S(b); auto& constants = frame->closure->function->constants;
+                if (c >= constants.size() || !constants[c].is_string()) { runtime_error("Invalid field name"); RETURN_RUNTIME_ERROR; }
+                const std::string& field = constants[c].as_string()->value;
+                if (obj.is_instance()) { auto& fields = obj.as_instance()->fields; auto it = fields.find(field); if (it != fields.end()) { S(a) = it->second; } else { auto& methods = obj.as_instance()->klass->methods; auto meth_it = methods.find(field); S(a) = (meth_it != methods.end()) ? meth_it->second : Value(); } }
+                else if (obj.is_map()) { auto it = obj.as_map()->entries.find(field); S(a) = (it != obj.as_map()->entries.end()) ? it->second : Value(); }
+                else if (obj.is_class()) { auto& methods = obj.as_class()->methods; auto it = methods.find(field); S(a) = (it != methods.end()) ? it->second : Value(); }
+                else if (obj.is_string()) { if (field == "length") { S(a) = Value(static_cast<double>(obj.as_string()->value.size())); } else { S(a) = Value(); } }
+                else if (obj.is_array()) { if (field == "length") { S(a) = Value(static_cast<double>(obj.as_array()->elements.size())); } else { S(a) = Value(); } }
+                else { S(a) = Value(); }
+                break;
+            }
+            case Opcode::SET_FIELD: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+                Value obj = S(a); auto& constants = frame->closure->function->constants;
+                if (b >= constants.size() || !constants[b].is_string()) { runtime_error("Invalid field name"); RETURN_RUNTIME_ERROR; }
+                const std::string& field = constants[b].as_string()->value;
+                if (gc_is_marking()) gc_mark_value(S(c));
+                if (obj.is_instance()) { obj.as_instance()->fields[field] = S(c); }
+                else if (obj.is_class()) { obj.as_class()->methods[field] = S(c); }
+                else if (obj.is_map()) { obj.as_map()->entries[field] = S(c); }
+                else { runtime_error("Cannot set field on this value"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::NEW_CLASS: { uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4; auto& constants = frame->closure->function->constants; if (bx >= constants.size() || !constants[bx].is_string()) { runtime_error("Invalid class name"); RETURN_RUNTIME_ERROR; } auto* cls = allocate_class(constants[bx].as_string()->value); S(a) = Value(static_cast<Obj*>(cls)); break; }
+            case Opcode::NEW_INSTANCE: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; if (!S(b).is_class()) { runtime_error("Cannot instantiate non-class"); RETURN_RUNTIME_ERROR; } auto* inst = allocate_instance(S(b).as_class()); S(a) = Value(static_cast<Obj*>(inst)); break; }
+            case Opcode::GET_METHOD: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value obj = S(b); auto& constants = frame->closure->function->constants; if (c >= constants.size() || !constants[c].is_string()) { S(a) = Value(); break; } std::string method = constants[c].as_string()->value; if (obj.is_instance()) { auto& methods = obj.as_instance()->klass->methods; auto it = methods.find(method); S(a) = (it != methods.end()) ? it->second : Value(); } else { S(a) = Value(); } break; }
+            case Opcode::NEW_RANGE: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; if (!S(b).is_number() || !S(c).is_number()) { runtime_error("Range bounds must be numbers"); RETURN_RUNTIME_ERROR; } auto* map = allocate_map(); map->entries["start"] = S(b); map->entries["end"] = S(c); map->entries["__type__"] = Value(static_cast<Obj*>(get_string_table().intern("range"))); S(a) = Value(static_cast<Obj*>(map)); break; }
+            case Opcode::ITER_INIT: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4;
+                Value iterable = S(b); auto* iter = allocate_iterator();
+                if (iterable.is_array()) { iter->kind = ObjIterator::ArrayIter; iter->arr = iterable.as_array(); iter->arr_index = 0; }
+                else if (iterable.is_map() && iterable.as_map()->entries.count("__type__") && iterable.as_map()->entries["__type__"].is_string() && iterable.as_map()->entries["__type__"].as_string()->value == "range") { double start_val = iterable.as_map()->entries["start"].get_number(); double end_val = iterable.as_map()->entries["end"].get_number(); iter->kind = ObjIterator::RangeIter; iter->range_current = start_val; iter->range_end = end_val; iter->range_step = start_val <= end_val ? 1.0 : -1.0; }
+                else if (iterable.is_string()) { iter->kind = ObjIterator::StringIter; iter->str = iterable.as_string(); iter->str_index = 0; }
+                else { runtime_error("Cannot iterate this value"); RETURN_RUNTIME_ERROR; }
+                S(a) = Value(static_cast<Obj*>(iter)); break;
+            }
+            case Opcode::ITER_NEXT: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4;
+                Value iter_val = S(b); if (!iter_val.is_iterator()) { runtime_error("Invalid iterator"); RETURN_RUNTIME_ERROR; }
+                auto* iter = iter_val.as_iterator();
+                if (iter->kind == ObjIterator::ArrayIter) { if (iter->arr_index < (int)iter->arr->elements.size()) { S(a) = iter->arr->elements[iter->arr_index++]; } else { iter->done = true; S(a) = Value(); } }
+                else if (iter->kind == ObjIterator::RangeIter) { bool done = (iter->range_step > 0) ? (iter->range_current > iter->range_end) : (iter->range_current < iter->range_end); if (!done) { S(a) = Value(iter->range_current); iter->range_current += iter->range_step; } else { iter->done = true; S(a) = Value(); } }
+                else { auto& s = iter->str->value; if (iter->str_index < (int)s.size()) { auto* ch = get_string_table().intern(std::string(1, s[iter->str_index++])); S(a) = Value(static_cast<Obj*>(ch)); } else { iter->done = true; S(a) = Value(); } }
+                break;
+            }
+            case Opcode::ITER_DONE: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; Value iter = S(b); if (iter.is_iterator()) { S(a) = Value(iter.as_iterator()->done); } else { S(a) = Value(true); } break; }
+            case Opcode::PRINT: { uint8_t a = ip[1]; ip += 4; std::cout << S(a).to_string() << std::endl; break; }
             case Opcode::HALT: return InterpretResult::Ok;
             case Opcode::NOP: ip += 4; break;
-            default: runtime_error("Unknown opcode"); RETURN_RUNTIME_ERROR;
+            case Opcode::SIGNAL_CREATE: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; auto* sig = allocate_signal(S(b), "signal"); S(a) = Value(static_cast<Obj*>(sig)); break; }
+            case Opcode::SIGNAL_GET: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; Value sig_val = S(b); if (!sig_val.is_signal()) { runtime_error("SIGNAL_GET: not a signal"); RETURN_RUNTIME_ERROR; } auto* sig = sig_val.as_signal(); if (sig->native_getter) { S(a) = Value(sig->native_getter(sig->export_userdata)); } else { S(a) = sig->value; } if (current_effect_ && !current_effect_->dependencies.contains(sig)) { current_effect_->dependencies.push_back(sig); sig->subscribers.push_back(current_effect_); } break; }
+            case Opcode::SIGNAL_SET: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4;
+                Value sig_val = S(a); if (!sig_val.is_signal()) { runtime_error("SIGNAL_SET: not a signal"); RETURN_RUNTIME_ERROR; }
+                auto* sig = sig_val.as_signal();
+                if (sig->native_setter) { Value nv = S(b); sig->native_setter(sig->export_userdata, nv.is_number() ? nv.get_number() : 0.0); }
+                sig->value = S(b); sig->write_generation = ++write_generation_;
+                { uint32_t gen = sig->write_generation; for (auto* eff : sig->subscribers) { if (eff->last_queued_gen != gen && eff->body) { if (eff->state == ObjEffect::State::Running) { eff->dirty = true; } else { eff->last_queued_gen = gen; eff->state = ObjEffect::State::Queued; eff->consecutive_reruns = 0; effect_queue_.push_back(eff); } } } }
+                break;
+            }
+            case Opcode::EFFECT_CREATE: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; Value closure_val = S(b); if (!closure_val.is_closure()) { runtime_error("EFFECT_CREATE: body must be a closure"); RETURN_RUNTIME_ERROR; } auto* eff = allocate_effect(closure_val.as_closure(), "effect"); S(a) = Value(static_cast<Obj*>(eff)); break; }
+            case Opcode::EFFECT_RUN: {
+                uint8_t a = ip[1]; ip += 4; Value eff_val = S(a);
+                if (!eff_val.is_effect()) { runtime_error("EFFECT_RUN: not an effect"); RETURN_RUNTIME_ERROR; }
+                auto* eff = eff_val.as_effect(); if (!eff->body) break;
+                for (auto* old_sig : eff->dependencies) { old_sig->subscribers.erase(eff); }
+                eff->dependencies.clear(); eff->state = ObjEffect::State::Running;
+                current_effect_ = eff; effect_frame_depth_ = frame_count_ + 1;
+                frame->ip = ip; int save_top = stack_top_;
+                if (stack_top_ >= MAX_STACK) { current_effect_ = nullptr; RETURN_RUNTIME_ERROR; }
+                stack_[stack_top_++] = Value(static_cast<Obj*>(eff->body));
+                if (!call(eff->body, 0, save_top, save_top)) { current_effect_ = nullptr; RETURN_RUNTIME_ERROR; }
+                REFRESH_FRAME(); break;
+            }
+            case Opcode::EXPORT_REGISTER: {
+                uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4;
+                Value sig_val = S(a);
+                if (sig_val.is_signal()) {
+                    auto& constants = frame->closure->function->constants;
+                    if (bx < constants.size() && constants[bx].is_string()) {
+                        get_export_registry().push_back({constants[bx].as_string()->value, sig_val.as_signal()});
+                    }
+                }
+                break;
+            }
+            case Opcode::ENUM_CREATE: { uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4; auto& constants = frame->closure->function->constants; if (bx >= constants.size() || !constants[bx].is_string()) { runtime_error("Invalid enum name constant"); RETURN_RUNTIME_ERROR; } ObjString* name = constants[bx].as_string(); auto* cls = allocate_class(name->value); uint16_t tid = enum_type_counter_++; cls->methods["_type_id"] = Value(static_cast<double>(tid)); S(a) = Value(static_cast<Obj*>(cls)); break; }
+            case Opcode::ENUM_VARIANT: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; auto& constants = frame->closure->function->constants; if (!S(a).is_class()) { runtime_error("ENUM_VARIANT: not a class"); RETURN_RUNTIME_ERROR; } auto* cls = S(a).as_class(); if (b >= constants.size() || !constants[b].is_string()) { runtime_error("Invalid variant name constant"); RETURN_RUNTIME_ERROR; } ObjString* variant_name = constants[b].as_string(); double type_id_d = 0; auto tid_it = cls->methods.find("_type_id"); if (tid_it != cls->methods.end() && tid_it->second.is_number()) { type_id_d = tid_it->second.get_number(); } uint16_t type_id = static_cast<uint16_t>(type_id_d); uint16_t variant_idx = 0; if (c < constants.size() && constants[c].is_number()) { variant_idx = static_cast<uint16_t>(constants[c].get_number()); } Value enum_val = make_enum_value(type_id, variant_idx); cls->methods[variant_name->value] = enum_val; break; }
+            case Opcode::ENUM_DATA_VARIANT: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; auto& constants = frame->closure->function->constants; if (!S(a).is_class()) { runtime_error("ENUM_DATA_VARIANT: not a class"); RETURN_RUNTIME_ERROR; } auto* cls = S(a).as_class(); if (b >= constants.size() || !constants[b].is_string()) { runtime_error("Invalid variant name constant"); RETURN_RUNTIME_ERROR; } ObjString* variant_name = constants[b].as_string(); auto* marker = get_string_table().intern("__data_variant__:" + variant_name->value); cls->methods[variant_name->value] = Value(static_cast<Obj*>(marker)); break; }
+            case Opcode::ENUM_GET: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; auto& constants = frame->closure->function->constants; Value obj = S(b); if (obj.is_class() && c < constants.size() && constants[c].is_string()) { ObjString* name = constants[c].as_string(); auto it = obj.as_class()->methods.find(name->value); S(a) = (it != obj.as_class()->methods.end()) ? it->second : Value(); } else { S(a) = Value(); } break; }
+            case Opcode::ENUM_IS: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; auto& constants = frame->closure->function->constants; Value val = S(b); if (c >= constants.size() || !constants[c].is_string()) { S(a) = Value(false); break; } ObjString* enum_name = constants[c].as_string(); if (is_enum_value(val)) { auto it = globals_.find(enum_name); if (it != globals_.end() && it->second.is_class()) { auto tid_it = it->second.as_class()->methods.find("_type_id"); if (tid_it != it->second.as_class()->methods.end() && tid_it->second.is_number()) { uint16_t expected_tid = static_cast<uint16_t>(tid_it->second.get_number()); S(a) = Value(enum_type_id(val) == expected_tid); } else { S(a) = Value(false); } } else { S(a) = Value(false); } } else if (val.is_instance()) { auto ft = val.as_instance()->fields.find("_enum_type"); if (ft != val.as_instance()->fields.end() && ft->second.is_string()) { S(a) = Value(ft->second.as_string()->value == enum_name->value); } else { S(a) = Value(false); } } else { S(a) = Value(false); } break; }
+            case Opcode::BIT_AND: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) & static_cast<int64_t>(rc.get_number()))); } else { runtime_error("Operands must be numbers (bitwise AND)"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::BIT_OR: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) | static_cast<int64_t>(rc.get_number()))); } else { runtime_error("Operands must be numbers (bitwise OR)"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::BIT_XOR: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) ^ static_cast<int64_t>(rc.get_number()))); } else { runtime_error("Operands must be numbers (bitwise XOR)"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::BIT_NOT: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; Value& rb = S(b); if (rb.is_number()) { S(a) = Value(static_cast<double>(~static_cast<int64_t>(rb.get_number()))); } else { runtime_error("Operand must be a number (bitwise NOT)"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::SHL: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) << static_cast<int64_t>(rc.get_number()))); } else { runtime_error("Operands must be numbers (shift left)"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::SHR: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; Value& rb = S(b); Value& rc = S(c); if (rb.is_number() && rc.is_number()) { S(a) = Value(static_cast<double>(static_cast<int64_t>(rb.get_number()) >> static_cast<int64_t>(rc.get_number()))); } else { runtime_error("Operands must be numbers (shift right)"); RETURN_RUNTIME_ERROR; } break; }
+            case Opcode::FIBER_YIELD: { uint8_t a = ip[1]; ip += 4; if (fiber_resuming_) { fiber_resuming_ = false; S(a) = fiber_resume_value_; break; } if (skip_native_call_) { skip_native_call_ = false; S(a) = skip_native_result_; break; } if (!active_fiber_) { runtime_error("Cannot yield outside a fiber"); RETURN_RUNTIME_ERROR; } yield_pending_ = true; yield_value_ = S(a); break; }
+            case Opcode::FIBER_RESUME: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4;
+                Value fiber_val = S(b); Value resume_val = S(c);
+                if (!fiber_val.is_fiber()) { runtime_error("Can only resume a fiber"); RETURN_RUNTIME_ERROR; }
+                auto* fiber = fiber_val.as_fiber();
+                if (fiber->state == ObjFiber::State::Done) { runtime_error("Cannot resume a finished fiber"); RETURN_RUNTIME_ERROR; }
+                if (fiber->state == ObjFiber::State::Suspended) {
+                    int caller_base = frame->base_register; stack_top_ = caller_base;
+                    if (stack_top_ + (int)fiber->saved_stack.size() > MAX_STACK) { runtime_error("Stack overflow resuming fiber"); RETURN_RUNTIME_ERROR; }
+                    for (size_t i = 0; i < fiber->saved_stack.size(); i++) { stack_[stack_top_++] = fiber->saved_stack[i]; }
+                    int new_frame_base = frame_count_;
+                    if (new_frame_base + fiber->saved_frame_count > MAX_FRAMES) { runtime_error("Frame overflow resuming fiber"); RETURN_RUNTIME_ERROR; }
+                    frame_count_ = new_frame_base + fiber->saved_frame_count;
+                    for (int i = 0; i < fiber->saved_frame_count; i++) { auto& sf = fiber->saved_frames[i]; auto& f = frames_[new_frame_base + i]; f.base_register = sf.base_register + caller_base; f.return_register = sf.return_register; f.callee_stack_pos = sf.callee_stack_pos + caller_base; f.caller_stack_top = sf.caller_stack_top; if (sf.callee_stack_pos >= 0 && sf.callee_stack_pos < (int)fiber->saved_stack.size() && fiber->saved_stack[sf.callee_stack_pos].is_closure()) { f.closure = fiber->saved_stack[sf.callee_stack_pos].as_closure(); f.ip = f.closure->function->bytecode.data() + sf.ip_offset; } }
+                    fiber->frame_base = new_frame_base; open_upvalues_ = fiber->saved_open_upvalues;
+                    fiber->state = ObjFiber::State::Running; fiber->parent = active_fiber_; fiber->resume_return_reg = a;
+                    active_fiber_ = fiber; fiber_resuming_ = true; fiber_resume_value_ = resume_val;
+                    REFRESH_FRAME(); break;
+                }
+                // Created state
+                fiber->state = ObjFiber::State::Running; fiber->parent = active_fiber_; fiber->resume_return_reg = a; active_fiber_ = fiber;
+                int callee_abs = stack_top_;
+                if (stack_top_ + 1 + (int)fiber->initial_args.size() > MAX_STACK) { active_fiber_ = nullptr; runtime_error("Stack overflow starting fiber"); RETURN_RUNTIME_ERROR; }
+                stack_[stack_top_++] = Value(static_cast<Obj*>(fiber->entry));
+                int arg_count = 0;
+                if (!resume_val.is_nil()) { stack_[stack_top_++] = resume_val; arg_count = 1; } else { arg_count = (int)fiber->initial_args.size(); for (int i = 0; i < arg_count; i++) { stack_[stack_top_++] = fiber->initial_args[i]; } }
+                fiber->frame_base = frame_count_;
+                frame->ip = ip; if (!call(fiber->entry, arg_count, a, callee_abs)) { active_fiber_ = nullptr; RETURN_RUNTIME_ERROR; }
+                REFRESH_FRAME(); break;
+            }
+            case Opcode::TAIL_CALL: {
+                uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4;
+                int arg_count = b; int callee_abs = base + a; Value callee = stack_[callee_abs];
+                if (callee.is_closure()) {
+                    auto* closure = callee.as_closure();
+                    if (arg_count != closure->function->arity) { runtime_error("Expected %d arguments but got %d", closure->function->arity, arg_count); RETURN_RUNTIME_ERROR; }
+                    while (open_upvalues_ && open_upvalues_->location >= &stack_[base]) { ObjUpvalue* uv = open_upvalues_; uv->closed = *uv->location; uv->location = &uv->closed; open_upvalues_ = uv->next_upvalue; }
+                    int args_src = callee_abs + 1;
+                    int needed = closure->function->register_count;
+                    if (base + needed > MAX_STACK) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
+                    for (int i = 0; i < arg_count; i++) { stack_[base + i] = stack_[args_src + i]; }
+                    for (int i = arg_count; i < needed; i++) { stack_[base + i] = Value(); }
+                    frame->closure = closure; ip = closure->function->bytecode.data(); stack_top_ = base + needed;
+                } else if (callee.is_class()) {
+                    auto* instance = allocate_instance(callee.as_class()); Value instance_val = Value(static_cast<Obj*>(instance)); stack_[callee_abs] = instance_val;
+                    auto& methods = callee.as_class()->methods; auto init_it = methods.find("init");
+                    if (init_it != methods.end() && init_it->second.is_closure()) {
+                        auto* init_closure = init_it->second.as_closure();
+                        int total_args = arg_count + 1;
+                        if (callee_abs + 1 + total_args > MAX_STACK) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
+                        for (int i = arg_count; i > 0; i--) { stack_[callee_abs + 1 + i] = stack_[callee_abs + 1 + i - 1]; }
+                        stack_[callee_abs + 1] = instance_val; stack_top_ += 1;
+                        while (open_upvalues_ && open_upvalues_->location >= &stack_[base]) { ObjUpvalue* uv = open_upvalues_; uv->closed = *uv->location; uv->location = &uv->closed; open_upvalues_ = uv->next_upvalue; }
+                        int args_src = callee_abs + 1; int total_args = arg_count + 1;
+                        int needed = init_closure->function->register_count;
+                        if (base + needed > MAX_STACK) { runtime_error("Stack overflow"); RETURN_RUNTIME_ERROR; }
+                        for (int i = 0; i < total_args; i++) { stack_[base + i] = stack_[args_src + i]; }
+                        for (int i = total_args; i < needed; i++) { stack_[base + i] = Value(); }
+                        frame->closure = init_closure; ip = init_closure->function->bytecode.data(); stack_top_ = base + needed;
+                    }
+                } else { runtime_error("Tail call target must be a function or class"); RETURN_RUNTIME_ERROR; }
+                break;
+            }
+            case Opcode::THROW: {
+                uint8_t a = ip[1]; ip += 4;
+                Value exception = S(a); std::string msg = exception.to_string();
+                if (try_count_ > 0) {
+                    TryFrame& tf = try_frames_[--try_count_];
+                    while (frame_count_ > tf.frame_count) {
+                        Value* slot_ptr = &stack_[frames_[frame_count_ - 1].base_register];
+                        while (open_upvalues_ && open_upvalues_->location >= slot_ptr) {
+                            ObjUpvalue* uv = open_upvalues_;
+                            uv->closed = *uv->location;
+                            uv->location = &uv->closed;
+                            open_upvalues_ = uv->next_upvalue;
+                        }
+                        frame_count_--;
+                    }
+                    REFRESH_FRAME(); ip = tf.catch_ip;
+                    if (exception.is_string()) { S(tf.catch_register) = exception; } else { auto* err_str = get_string_table().intern(msg); S(tf.catch_register) = Value(static_cast<Obj*>(err_str)); }
+                    break;
+                }
+                runtime_error("%s", msg.c_str()); RETURN_RUNTIME_ERROR;
+            }
+            case Opcode::TRY_BEGIN: { uint8_t a = ip[1]; uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4; if (try_count_ >= MAX_TRY) { runtime_error("Too many nested try blocks"); RETURN_RUNTIME_ERROR; } TryFrame& tf = try_frames_[try_count_++]; tf.frame_count = frame_count_; tf.catch_ip = ip + static_cast<int16_t>(bx); tf.catch_register = a; break; }
+            case Opcode::TRY_END: { uint16_t bx = (ip[2] << 8) | ip[3]; ip += 4; if (try_count_ > 0) try_count_--; if (bx > 0) { ip += bx; } break; }
+            case Opcode::AWAIT: { uint8_t a = ip[1]; ip += 4; Value val = S(a); if (val.is_nil()) { int callee_pos = frame->callee_stack_pos; int saved_top = frame->caller_stack_top; frame_count_--; if (frame_count_ == 0) { stack_top_ = 0; stack_[stack_top_++] = Value(); return InterpretResult::Ok; } stack_top_ = std::max(saved_top, callee_pos + 1); stack_[callee_pos] = Value(); REFRESH_FRAME(); } break; }
+            case Opcode::INVOKE: { runtime_error("INVOKE not fully implemented"); RETURN_RUNTIME_ERROR; }
+            // Quickened numeric opcodes (skips runtime type checks)
+            case Opcode::ADD_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() + S(c).get_number()); break; }
+            case Opcode::ADD_STR: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; auto* result = get_string_table().intern(S(b).as_string()->value + S(c).as_string()->value); S(a) = Value(static_cast<Obj*>(result)); break; }
+            case Opcode::SUB_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() - S(c).get_number()); break; }
+            case Opcode::MUL_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() * S(c).get_number()); break; }
+            case Opcode::DIV_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; double rhs = S(c).get_number(); if (rhs == 0) { runtime_error("Division by zero"); RETURN_RUNTIME_ERROR; } S(a) = Value(S(b).get_number() / rhs); break; }
+            case Opcode::MOD_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; double rhs = S(c).get_number(); if (rhs == 0) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; } S(a) = Value(fmod(S(b).get_number(), rhs)); break; }
+            case Opcode::EQ_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() == S(c).get_number()); break; }
+            case Opcode::NEQ_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() != S(c).get_number()); break; }
+            case Opcode::LT_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() < S(c).get_number()); break; }
+            case Opcode::LTE_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() <= S(c).get_number()); break; }
+            case Opcode::GT_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() > S(c).get_number()); break; }
+            case Opcode::GTE_NUM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() >= S(c).get_number()); break; }
+            case Opcode::MOD_EQ_ZERO: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; double divisor = S(c).get_number(); if (divisor == 0) { runtime_error("Modulo by zero"); RETURN_RUNTIME_ERROR; } S(a) = Value(fmod(S(b).get_number(), divisor) == 0.0); break; }
+            case Opcode::LOAD_IMM: { uint8_t a = ip[1]; uint8_t b = ip[2]; ip += 4; S(a) = Value(static_cast<double>(b)); break; }
+            case Opcode::ADD_IMM: { uint8_t a = ip[1]; uint8_t b = ip[2]; uint8_t c = ip[3]; ip += 4; S(a) = Value(S(b).get_number() + static_cast<double>(c)); break; }
+            // Fused compare-branch opcodes
+            case Opcode::JMP_IF_NOT_LT: { uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4; if (!(S(a).get_number() < S(b).get_number())) ip += c; break; }
+            case Opcode::JMP_IF_NOT_LTE: { uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4; if (!(S(a).get_number() <= S(b).get_number())) ip += c; break; }
+            case Opcode::JMP_IF_NOT_GT: { uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4; if (!(S(a).get_number() > S(b).get_number())) ip += c; break; }
+            case Opcode::JMP_IF_NOT_GTE: { uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4; if (!(S(a).get_number() >= S(b).get_number())) ip += c; break; }
+            case Opcode::JMP_IF_NOT_EQ: { uint8_t a = ip[1]; uint8_t b = ip[2]; int8_t c = static_cast<int8_t>(ip[3]); ip += 4; if (!(S(a) == S(b))) ip += c; break; }
+            default: runtime_error("Unknown opcode %d", instruction); RETURN_RUNTIME_ERROR;
         }
     }
 #endif
@@ -3078,6 +3541,10 @@ Value VM::call_function(ObjClosure* closure, const std::vector<Value>& args) {
 
     // Push closure and args
     int callee_abs = stack_top_;
+    if (stack_top_ + 1 + (int)args.size() > MAX_STACK) {
+        runtime_error("Stack overflow");
+        return Value();
+    }
     stack_[stack_top_++] = Value(static_cast<Obj*>(closure));
     for (auto& arg : args) {
         stack_[stack_top_++] = arg;
@@ -3121,6 +3588,7 @@ Value VM::jit_call_direct(ObjClosure* closure, Value* args, int arg_count) {
 
         static constexpr uint64_t NIL_B = 0x7FFC000000000000ULL;
         int needed = func->register_count;
+        if (args_abs + needed > MAX_STACK) { frame_count_--; return Value(); }
         for (int i = arg_count; i < needed; i++) {
             stack_[args_abs + i].bits = NIL_B;
         }
@@ -3141,6 +3609,7 @@ Value VM::jit_call_direct(ObjClosure* closure, Value* args, int arg_count) {
     // Copy args to a temporary on the stack (no heap alloc)
     int saved_top = stack_top_;
     int callee_abs = stack_top_;
+    if (stack_top_ + 1 + arg_count > MAX_STACK) { runtime_error("Stack overflow"); return Value(); }
     stack_[stack_top_++] = Value(static_cast<Obj*>(closure));
     for (int i = 0; i < arg_count; i++) {
         stack_[stack_top_++] = args[i];
@@ -3203,12 +3672,12 @@ bool VM::call(ObjClosure* closure, int arg_count, int return_reg, int callee_abs
     // Initialize remaining registers to nil (skip varargs register)
     int needed = closure->function->register_count;
     int varargs_slot = has_varargs ? fixed_arity : -1;
+    int new_top = args_abs + needed;
+    if (new_top > MAX_STACK) { runtime_error("Stack overflow"); return false; }
     for (int i = arg_count; i < needed; i++) {
         if (i == varargs_slot) continue;  // don't overwrite varargs array
         stack_[args_abs + i] = Value();
     }
-    int new_top = args_abs + needed;
-    if (new_top > MAX_STACK) { runtime_error("Stack overflow"); return false; }
     if (new_top > stack_top_) stack_top_ = new_top;
 
     return true;
@@ -3218,6 +3687,7 @@ bool VM::call_native(ObjNative* native, int arg_count, int /*return_reg*/, int c
     Value* args = &stack_[callee_abs + 1];
     Value result = native->function(arg_count, args);
     stack_top_ = callee_abs;
+    if (stack_top_ >= MAX_STACK) { runtime_error("Stack overflow"); return false; }
     stack_[stack_top_++] = result; // push result at callee position
     return true;
 }
@@ -3232,6 +3702,7 @@ Value& VM::slot(int index) {
 }
 
 void VM::push(Value value) {
+    if (stack_top_ >= MAX_STACK) { runtime_error("Stack overflow"); return; }
     stack_[stack_top_++] = value;
 }
 
@@ -3258,7 +3729,9 @@ bool VM::throw_to_catch(const std::string& msg) {
     auto* err_str = get_string_table().intern(msg);
     // Store exception directly in the stack at the correct position
     int abs_pos = f->base_register + tf.catch_register;
-    stack_[abs_pos] = Value(static_cast<Obj*>(err_str));
+    if (abs_pos >= 0 && abs_pos < MAX_STACK) {
+        stack_[abs_pos] = Value(static_cast<Obj*>(err_str));
+    }
     return true;
 }
 

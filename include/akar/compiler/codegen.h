@@ -98,6 +98,7 @@ private:
     void compile_signal_decl(SignalDeclStmt* node);
     void compile_effect(EffectStmt* node);
     void compile_enum(EnumStmt* node);
+    void compile_export_var(ExportVarStmt* node);
     void compile_expr_stmt(ExprStmt* node);
 
     // Register allocation

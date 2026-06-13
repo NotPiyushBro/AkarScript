@@ -233,6 +233,7 @@ void CodeGenerator::compile_stmt(const ASTPtr& node) {
         case NodeType::SignalDeclStmt: compile_signal_decl(static_cast<SignalDeclStmt*>(node.get())); break;
         case NodeType::EffectStmt: compile_effect(static_cast<EffectStmt*>(node.get())); break;
         case NodeType::EnumStmt: compile_enum(static_cast<EnumStmt*>(node.get())); break;
+        case NodeType::ExportVarStmt: compile_export_var(static_cast<ExportVarStmt*>(node.get())); break;
         default:
             // Treat as expression
             { compile_expr(node); free_register(); }
@@ -1323,7 +1324,7 @@ void CodeGenerator::compile_include(IncludeStmt* node) {
 // Register allocation
 int CodeGenerator::alloc_register() {
     int reg = current_scope_->next_register++;
-    if (reg >= 65535) throw std::runtime_error("Register limit exceeded");
+    if (reg >= 65536) throw std::runtime_error("Register limit exceeded");
     if (current_scope_->next_register > current_scope_->max_registers) {
         current_scope_->max_registers = current_scope_->next_register;
     }
@@ -1541,6 +1542,33 @@ void CodeGenerator::compile_signal_decl(SignalDeclStmt* node) {
     }
 }
 
+void CodeGenerator::compile_export_var(ExportVarStmt* node) {
+    // Compile exactly like a signal declaration
+    int reg = compile_expr(node->initializer);
+    emit(op_byte(Opcode::SIGNAL_CREATE), reg, reg, 0);
+
+    // Track as signal so reads/writes use SIGNAL_GET/SET
+    signal_set_.insert(node->name);
+
+    if (current_scope_->enclosing == nullptr && current_scope_->scope_depth == 0) {
+        // Top-level: register as global AND in the export registry
+        uint16_t name_const = make_identifier_constant(node->name);
+        emit_bx(op_byte(Opcode::SET_GLOBAL), reg, name_const);
+        // EXPORT_REGISTER R[reg], name_const — registers the signal in the export registry
+        emit_bx(op_byte(Opcode::EXPORT_REGISTER), reg, name_const);
+        free_register();
+    } else {
+        // Local scope: register for cleanup, but still export
+        if (!signal_scope_stack_.empty()) {
+            signal_scope_stack_.back().push_back(node->name);
+        }
+        declare_local(node->name, reg);
+        // For local exports, we still need to register in the export registry
+        uint16_t name_const = make_identifier_constant(node->name);
+        emit_bx(op_byte(Opcode::EXPORT_REGISTER), reg, name_const);
+    }
+}
+
 void CodeGenerator::compile_effect(EffectStmt* node) {
     // The effect body becomes a closure (function with no args)
     auto* func = compile_function("__effect__", {}, node->body);
@@ -1632,6 +1660,7 @@ static int opcode_dest_reg(uint8_t op) {
         case Opcode::BIT_NOT: case Opcode::SHL: case Opcode::SHR:
         case Opcode::SIGNAL_CREATE: case Opcode::SIGNAL_GET:
         case Opcode::EFFECT_CREATE:
+        case Opcode::EXPORT_REGISTER:
         case Opcode::ENUM_CREATE: case Opcode::ENUM_GET: case Opcode::ENUM_IS:
         case Opcode::LOAD_IMM: case Opcode::ADD_IMM:
             return 0; // A is destination
@@ -1657,6 +1686,7 @@ static int opcode_src_regs(uint8_t op) {
         case Opcode::CLOSE_UPVALUE: case Opcode::THROW: case Opcode::AWAIT:
         case Opcode::JMP_IF_FALSE: case Opcode::JMP_IF_TRUE:
         case Opcode::FIBER_YIELD: case Opcode::EFFECT_RUN:
+        case Opcode::EXPORT_REGISTER:
             return 1; // reads A only
         case Opcode::SIGNAL_SET:
             return 3; // reads A and B
@@ -1709,12 +1739,15 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
 
     // --- Pass 1: Fuse LOAD_IMM + ADD → ADD_IMM ---
     for (size_t i = 0; i + 8 <= len; i += 4) {
+        // Skip WIDE instructions (8 bytes) — never emitted by peephole targets
+        if (bytecode[i] == op_byte(Opcode::WIDE)) { i += 4; continue; }
         if (bytecode[i] != op_byte(Opcode::LOAD_IMM)) continue;
         uint8_t imm_dest = bytecode[i + 1];
         uint8_t imm_value = bytecode[i + 2];
 
         size_t next = i + 4;
         if (next + 4 > len) break;
+        if (bytecode[next] == op_byte(Opcode::WIDE)) continue; // WIDE can't be ADD
         if (bytecode[next] != op_byte(Opcode::ADD) && bytecode[next] != op_byte(Opcode::ADD_NUM)) continue;
 
         uint8_t add_a = bytecode[next + 1];
@@ -1738,6 +1771,10 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
 
     // --- Pass 2: Fuse compare + branch → JMP_IF_NOT_LT/LTE/GT/GTE/EQ ---
     for (size_t i = 0; i + 8 <= len; i += 4) {
+        // Skip WIDE instructions (8 bytes) — can't fuse with 16-bit operands
+        if (bytecode[i] == op_byte(Opcode::WIDE)) { i += 4; continue; }
+        // Skip WIDE instructions (8 bytes)
+        if (bytecode[i] == op_byte(Opcode::WIDE)) { i += 4; continue; }
         uint8_t op = bytecode[i];
         Opcode cmp_op = static_cast<Opcode>(op);
         // Handle both base and quickened (type-specialized) comparison opcodes
@@ -1754,6 +1791,7 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
 
         size_t next = i + 4;
         if (next + 4 > len) continue;
+        if (bytecode[next] == op_byte(Opcode::WIDE)) continue; // WIDE can't be JMP_IF_FALSE
         if (bytecode[next] != op_byte(Opcode::JMP_IF_FALSE)) continue;
         if (bytecode[next + 1] != cmp_a) continue;
 
@@ -1782,10 +1820,13 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
     // --- Pass 2b: Eliminate dead MOVE before backward JMP ---
     // Pattern: MOVE Rdest, Rsrc followed by JMP backward where the target writes Rdest
     for (size_t i = 0; i + 8 <= len; i += 4) {
+        // Skip WIDE instructions (8 bytes)
+        if (bytecode[i] == op_byte(Opcode::WIDE)) { i += 4; continue; }
         if (bytecode[i] != op_byte(Opcode::MOVE)) continue;
         uint8_t move_dest = bytecode[i + 1];
         size_t next = i + 4;
         if (next + 4 > len) continue;
+        if (bytecode[next] == op_byte(Opcode::WIDE)) continue; // WIDE can't be JMP
         if (bytecode[next] != op_byte(Opcode::JMP)) continue;
         // Check if the JMP target writes to move_dest
         int16_t jmp_offset = static_cast<int16_t>((bytecode[next + 2] << 8) | bytecode[next + 3]);
@@ -1824,18 +1865,24 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
     }
 
     // --- Pass 3: Compact — remove NOPs and fix all jump offsets ---
-    // Count NOPs
+    // Count NOPs (only on 4-byte boundaries, never inside WIDE instructions)
     size_t nop_count = 0;
     for (size_t i = 0; i < len; i += 4) {
+        if (bytecode[i] == op_byte(Opcode::WIDE)) { i += 4; continue; }
         if (bytecode[i] == op_byte(Opcode::NOP)) nop_count++;
     }
     if (nop_count == 0) return; // nothing to compact
 
     // Build old_offset → new_offset mapping
+    // WIDE instructions occupy 8 bytes; regular instructions occupy 4 bytes
     std::vector<size_t> old_to_new(len, 0);
     size_t new_pos = 0;
     for (size_t i = 0; i < len; i += 4) {
         old_to_new[i] = new_pos;
+        if (bytecode[i] == op_byte(Opcode::WIDE)) {
+            i += 4; // skip WIDE interior
+            continue;
+        }
         if (bytecode[i] != op_byte(Opcode::NOP)) {
             new_pos += 4;
         }
@@ -1843,6 +1890,32 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
 
     // Fix jump offsets BEFORE compacting (adjust offsets using the mapping)
     for (size_t i = 0; i < len; i += 4) {
+        if (bytecode[i] == op_byte(Opcode::WIDE)) {
+            // Handle WIDE jump instructions: offset is in bytes [4..5] (high/low)
+            uint8_t wide_op = bytecode[i + 1];
+            bool is_wide_jump = (static_cast<Opcode>(wide_op) == Opcode::JMP ||
+                                 static_cast<Opcode>(wide_op) == Opcode::JMP_IF_FALSE ||
+                                 static_cast<Opcode>(wide_op) == Opcode::JMP_IF_TRUE);
+            if (is_wide_jump) {
+                // WIDE offset encoding: patch_jump stores offset in bytes [5]=high, [7]=low
+                // VM reads: wb=(i[4]<<8)|i[5], wc=(i[6]<<8)|i[7], offset=(wb<<8)|wc
+                // With bytes [4]=0, [6]=0: offset = (i[5]<<8)|i[7]
+                int16_t old_offset = static_cast<int16_t>((bytecode[i + 5] << 8) | bytecode[i + 7]);
+                // WIDE: ip += WIDE_INST_SIZE at top of handler, then ip += offset
+                size_t old_target = static_cast<size_t>(static_cast<int64_t>(i) + WIDE_INST_SIZE + old_offset);
+                if (old_target < len) {
+                    size_t new_target = old_to_new[old_target];
+                    size_t new_source = old_to_new[i];
+                    int16_t new_offset = static_cast<int16_t>(new_target - new_source - WIDE_INST_SIZE);
+                    bytecode[i + 4] = 0;
+                    bytecode[i + 5] = (new_offset >> 8) & 0xFF;
+                    bytecode[i + 6] = 0;
+                    bytecode[i + 7] = new_offset & 0xFF;
+                }
+            }
+            i += 4; // skip WIDE interior
+            continue;
+        }
         if (bytecode[i] == op_byte(Opcode::NOP)) continue;
         uint8_t op = bytecode[i];
 
@@ -1897,11 +1970,22 @@ void CodeGenerator::peephole_optimize(std::vector<uint8_t>& bytecode) {
         }
     }
 
-    // Compact: remove NOPs
+    // Compact: remove NOPs, preserve WIDE instructions as 8-byte units
     std::vector<uint8_t> compacted;
     compacted.reserve(new_pos);
     for (size_t i = 0; i < len; i += 4) {
-        if (bytecode[i] != op_byte(Opcode::NOP)) {
+        if (bytecode[i] == op_byte(Opcode::WIDE)) {
+            // Copy WIDE instruction as a complete 8-byte unit
+            compacted.push_back(bytecode[i]);
+            compacted.push_back(bytecode[i + 1]);
+            compacted.push_back(bytecode[i + 2]);
+            compacted.push_back(bytecode[i + 3]);
+            compacted.push_back(bytecode[i + 4]);
+            compacted.push_back(bytecode[i + 5]);
+            compacted.push_back(bytecode[i + 6]);
+            compacted.push_back(bytecode[i + 7]);
+            i += 4; // skip interior bytes (loop i+=4 will skip the rest)
+        } else if (bytecode[i] != op_byte(Opcode::NOP)) {
             compacted.push_back(bytecode[i]);
             compacted.push_back(bytecode[i + 1]);
             compacted.push_back(bytecode[i + 2]);

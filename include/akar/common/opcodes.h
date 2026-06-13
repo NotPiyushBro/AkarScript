@@ -137,6 +137,8 @@ enum class Opcode : uint8_t {
     EFFECT_CREATE,  // A = effect(B) — create effect from closure R[B]
     EFFECT_RUN,     // run_effect(A) — schedule effect R[A] for immediate execution
 
+    EXPORT_REGISTER, // export_signal(A, name_BX) — register signal R[A] as exported variable with name constants[BX]
+
     // Enum
     ENUM_CREATE,    // A = enum(name_BX) — create enum class with name from constants[BX]
     ENUM_VARIANT,   // set_variant(A, B, C) — register variant: class R[A], name const_B, simple value R[C]

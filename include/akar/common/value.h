@@ -329,6 +329,12 @@ struct ObjSignal : Obj {
     SmallVec<ObjEffect*, 4> subscribers;      // effects that depend on this signal
     uint32_t write_generation = 0;            // incremented on each write (for dedup)
     std::string name;                         // debug name
+    // @export: native getter/setter callbacks for host interception
+    // When set, SIGNAL_GET calls getter instead of reading sig->value directly
+    // When set, SIGNAL_SET calls setter before updating sig->value
+    double (*native_getter)(void* userdata) = nullptr;
+    void (*native_setter)(void* userdata, double new_value) = nullptr;
+    void* export_userdata = nullptr;
 
     ObjSignal() { type = ObjType::Signal; alloc_size = sizeof(ObjSignal); }
 };
@@ -403,5 +409,12 @@ bool gc_is_marking();
 bool gc_gray_stack_empty();
 Obj* gc_gray_stack_pop();
 void gc_sweep_incremental(int max_work);  // sweep up to max_work objects
+
+// Export registry: tracks all @export variables for host enumeration
+struct ExportEntry {
+    std::string name;
+    ObjSignal* signal;
+};
+std::vector<ExportEntry>& get_export_registry();
 
 } // namespace akar

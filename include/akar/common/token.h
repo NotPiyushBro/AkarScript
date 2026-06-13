@@ -28,6 +28,7 @@ enum class TokenType {
     LeftBracket, RightBracket,
     Comma, Colon, Semicolon,
     Arrow, // ->
+    At, // @
 
     // Special
     Eof, Error

@@ -26,6 +26,8 @@ private:
     ASTPtr signal_declaration();
     ASTPtr effect_statement();
     ASTPtr enum_declaration();
+    ASTPtr annotation_declaration();
+    ASTPtr export_var_declaration();
     ASTPtr if_statement();
     ASTPtr while_statement();
     ASTPtr for_statement();

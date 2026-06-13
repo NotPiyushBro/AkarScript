@@ -16,6 +16,7 @@ ASTPtr Parser::parse_program() {
 }
 
 ASTPtr Parser::declaration() {
+    if (match(TokenType::At)) return annotation_declaration();
     if (match(TokenType::Let)) return let_declaration();
     if (match(TokenType::Fn)) return fn_declaration();
     if (match(TokenType::Class)) return class_declaration();
@@ -131,6 +132,26 @@ ASTPtr Parser::signal_declaration() {
     auto init = expression();
     match(TokenType::Semicolon);
     return std::make_shared<SignalDeclStmt>(name_tok.lexeme, init, line);
+}
+
+ASTPtr Parser::annotation_declaration() {
+    int line = previous().line;
+    // Parse annotation name (e.g., "export")
+    auto name_tok = expect(TokenType::Identifier, "Expected annotation name after '@'");
+    std::string annotation = name_tok.lexeme;
+
+    if (annotation == "export") {
+        // @export let name = expr (or @export var name = expr)
+        // Skip optional 'let' or 'var' keyword
+        if (check(TokenType::Let)) advance();
+        auto var_name = expect(TokenType::Identifier, "Expected variable name after 'export'");
+        expect(TokenType::Equal, "Expected '=' after variable name");
+        auto init = expression();
+        match(TokenType::Semicolon);
+        return std::make_shared<ExportVarStmt>(var_name.lexeme, init, line);
+    }
+
+    throw std::runtime_error("Unknown annotation '@" + annotation + "' at line " + std::to_string(line));
 }
 
 ASTPtr Parser::effect_statement() {
@@ -658,6 +679,7 @@ void Parser::synchronize() {
             case TokenType::Include: case TokenType::Await:
             case TokenType::Switch: case TokenType::Try: case TokenType::Throw:
             case TokenType::Signal: case TokenType::Effect: case TokenType::Enum:
+            case TokenType::At:
                 return;
             default: advance(); break;
         }

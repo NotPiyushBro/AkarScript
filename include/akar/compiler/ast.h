@@ -26,6 +26,7 @@ enum class NodeType {
     AwaitStmt, DestructuringStmt,
     SwitchStmt, TryCatchStmt, ThrowStmt,
     EnumStmt, SignalDeclStmt, EffectStmt,
+    ExportVarStmt,
 };
 
 struct ASTNode {
@@ -316,6 +317,13 @@ struct SignalDeclStmt : ASTNode {
 struct EffectStmt : ASTNode {
     ASTPtr body;  // block statement
     EffectStmt(ASTPtr b, int l) : ASTNode(NodeType::EffectStmt, l), body(std::move(b)) {}
+};
+
+struct ExportVarStmt : ASTNode {
+    std::string name;
+    ASTPtr initializer;
+    ExportVarStmt(std::string n, ASTPtr init, int l)
+        : ASTNode(NodeType::ExportVarStmt, l), name(std::move(n)), initializer(std::move(init)) {}
 };
 
 } // namespace akar

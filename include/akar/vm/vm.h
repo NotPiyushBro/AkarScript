@@ -14,6 +14,15 @@
 
 namespace akar {
 
+// ============================================================================
+// THREAD SAFETY: The VM is NOT thread-safe. The GC, string table, object
+// allocation, and all global state are shared across VM instances without
+// synchronization. Use ONE VM per process/thread. Multiple VMs on different
+// threads will produce data races in the allocator, GC, and string interning.
+// If you need concurrent scripting, create one VM per thread and never share
+// objects between VMs.
+// ============================================================================
+
 // Call frame for function calls
 struct CallFrame {
     ObjClosure* closure = nullptr;
@@ -189,6 +198,9 @@ public:
 
     // Direct JIT call from JIT helper (avoids vector allocation)
     Value jit_call_direct(ObjClosure* closure, Value* args, int arg_count);
+
+    // External fiber tracking for GC (fibers created via API, not yet on VM stack)
+    std::vector<ObjFiber*> external_fibers_;
 
     // VM registration for GC (tracks all live VMs so GC marks from all roots)
     static std::unordered_set<VM*> active_vms_;

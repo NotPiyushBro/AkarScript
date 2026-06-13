@@ -136,6 +136,7 @@ void register_builtins(VM& vm) {
     // insert(array, index, value) - insert value at index, shifting elements right
     vm.define_native("insert", [](int argc, Value* argv) -> Value {
         if (argc < 3 || !argv[0].is_array() || !argv[1].is_number()) return Value();
+        if (gc_is_marking()) gc_mark_value(argv[2]);
         auto& elems = argv[0].as_array()->elements;
         int idx = safe_int(argv[1].get_number());
         if (idx < 0) idx = 0;
@@ -168,6 +169,7 @@ void register_builtins(VM& vm) {
     // unshift(array, value) - insert value at the beginning
     vm.define_native("unshift", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array()) return Value();
+        if (gc_is_marking()) gc_mark_value(argv[1]);
         argv[0].as_array()->elements.insert(argv[0].as_array()->elements.begin(), argv[1]);
         return argv[0];
     });
@@ -242,6 +244,7 @@ void register_builtins(VM& vm) {
         if (argc < 2 || !argv[1].is_number()) return Value();
         int count = safe_int(argv[1].get_number());
         if (count < 0) count = 0;
+        if (count > 1000000) count = 1000000;
         auto* arr = allocate_array();
         arr->elements.resize(count, argv[0]);
         return Value(static_cast<Obj*>(arr));
@@ -627,9 +630,9 @@ void register_builtins(VM& vm) {
         if (argc < 2 || !argv[0].is_string() || !argv[1].is_number()) return Value();
         auto& str = argv[0].as_string()->value;
         int start = safe_int(argv[1].get_number());
-        int len = (argc >= 3 && argv[2].is_number()) ? safe_int(argv[2].get_number()) : static_cast<int>(str.size()) - start;
         if (start < 0) start = 0;
         if (start >= static_cast<int>(str.size())) return Value(static_cast<Obj*>(get_string_table().intern("")));
+        int len = (argc >= 3 && argv[2].is_number()) ? safe_int(argv[2].get_number()) : static_cast<int>(str.size()) - start;
         if (len < 0) len = 0;
         return Value(static_cast<Obj*>(get_string_table().intern(str.substr(start, len))));
     });
@@ -638,19 +641,25 @@ void register_builtins(VM& vm) {
     vm.define_native("range", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_number() || !argv[1].is_number()) return Value();
         auto* arr = allocate_array();
-        int start = safe_int(argv[0].get_number());
-        int end = safe_int(argv[1].get_number());
-        int step = 1;
+        int64_t start = safe_int64(argv[0].get_number());
+        int64_t end = safe_int64(argv[1].get_number());
+        int64_t step = 1;
         if (argc >= 3 && argv[2].is_number()) {
-            step = safe_int(argv[2].get_number());
+            step = safe_int64(argv[2].get_number());
             if (step == 0) step = 1;
         }
+        static constexpr int64_t MAX_RANGE = 10000000;
+        int64_t count = 0;
+        if (step > 0 && start <= end) count = (end - start) / step + 1;
+        else if (step < 0 && start >= end) count = (start - end) / (-step) + 1;
+        if (count > MAX_RANGE) count = MAX_RANGE;
+        arr->elements.reserve(static_cast<size_t>(count));
         if (step > 0) {
-            for (int i = start; i <= end; i += step) {
+            for (int64_t i = start; count > 0; i += step, count--) {
                 arr->elements.push_back(Value(static_cast<double>(i)));
             }
         } else {
-            for (int i = start; i >= end; i += step) {
+            for (int64_t i = start; count > 0; i += step, count--) {
                 arr->elements.push_back(Value(static_cast<double>(i)));
             }
         }
@@ -734,7 +743,7 @@ void register_builtins(VM& vm) {
     vm.define_native("asin", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::asin(argv[0].get_number())) : Value(); });
     vm.define_native("acos", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::acos(argv[0].get_number())) : Value(); });
     vm.define_native("atan", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::atan(argv[0].get_number())) : Value(); });
-    vm.define_native("atan2", [](int argc, Value* argv) -> Value { return argc >= 2 ? Value(std::atan2(argv[0].get_number(), argv[1].get_number())) : Value(); });
+    vm.define_native("atan2", [](int argc, Value* argv) -> Value { return argc >= 2 && argv[0].is_number() && argv[1].is_number() ? Value(std::atan2(argv[0].get_number(), argv[1].get_number())) : Value(); });
 
     // Hyperbolic
     vm.define_native("sinh", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::sinh(argv[0].get_number())) : Value(); });
@@ -746,7 +755,7 @@ void register_builtins(VM& vm) {
     vm.define_native("log2", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::log2(argv[0].get_number())) : Value(); });
     vm.define_native("log10", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::log10(argv[0].get_number())) : Value(); });
     vm.define_native("exp", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::exp(argv[0].get_number())) : Value(); });
-    vm.define_native("pow", [](int argc, Value* argv) -> Value { return argc >= 2 ? Value(std::pow(argv[0].get_number(), argv[1].get_number())) : Value(); });
+    vm.define_native("pow", [](int argc, Value* argv) -> Value { return argc >= 2 && argv[0].is_number() && argv[1].is_number() ? Value(std::pow(argv[0].get_number(), argv[1].get_number())) : Value(); });
 
     // Rounding
     vm.define_native("round", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(std::round(argv[0].get_number())) : Value(); });
@@ -766,7 +775,7 @@ void register_builtins(VM& vm) {
         return Value(m);
     });
     vm.define_native("clamp", [](int argc, Value* argv) -> Value {
-        if (argc < 3) return Value();
+        if (argc < 3 || !argv[0].is_number() || !argv[1].is_number() || !argv[2].is_number()) return Value();
         double val = argv[0].get_number(), lo = argv[1].get_number(), hi = argv[2].get_number();
         if (val < lo) return Value(lo); if (val > hi) return Value(hi); return Value(val);
     });
@@ -777,12 +786,12 @@ void register_builtins(VM& vm) {
         double x = argv[0].get_number(); return Value(x > 0 ? 1.0 : (x < 0 ? -1.0 : 0.0));
     });
     vm.define_native("lerp", [](int argc, Value* argv) -> Value {
-        if (argc < 3) return Value();
+        if (argc < 3 || !argv[0].is_number() || !argv[1].is_number() || !argv[2].is_number()) return Value();
         return Value(argv[0].get_number() + (argv[1].get_number() - argv[0].get_number()) * argv[2].get_number());
     });
-    vm.define_native("deg_to_rad", [](int argc, Value* argv) -> Value { return argc >= 1 ? Value(argv[0].get_number() * M_PI / 180.0) : Value(); });
-    vm.define_native("rad_to_deg", [](int argc, Value* argv) -> Value { return argc >= 1 ? Value(argv[0].get_number() * 180.0 / M_PI) : Value(); });
-    vm.define_native("fmod", [](int argc, Value* argv) -> Value { return argc >= 2 ? Value(std::fmod(argv[0].get_number(), argv[1].get_number())) : Value(); });
+    vm.define_native("deg_to_rad", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(argv[0].get_number() * M_PI / 180.0) : Value(); });
+    vm.define_native("rad_to_deg", [](int argc, Value* argv) -> Value { return argc >= 1 && argv[0].is_number() ? Value(argv[0].get_number() * 180.0 / M_PI) : Value(); });
+    vm.define_native("fmod", [](int argc, Value* argv) -> Value { return argc >= 2 && argv[0].is_number() && argv[1].is_number() ? Value(std::fmod(argv[0].get_number(), argv[1].get_number())) : Value(); });
 
     // Vec2 [x, y]
     vm.define_native("vec2", [](int argc, Value* argv) -> Value {
@@ -794,6 +803,7 @@ void register_builtins(VM& vm) {
     vm.define_native("vec2_add", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
         auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        if (a->elements.size() < 2 || b->elements.size() < 2) return Value();
         auto* r = allocate_array();
         r->elements.push_back(Value(a->elements[0].get_number() + b->elements[0].get_number()));
         r->elements.push_back(Value(a->elements[1].get_number() + b->elements[1].get_number()));
@@ -802,6 +812,7 @@ void register_builtins(VM& vm) {
     vm.define_native("vec2_sub", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
         auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        if (a->elements.size() < 2 || b->elements.size() < 2) return Value();
         auto* r = allocate_array();
         r->elements.push_back(Value(a->elements[0].get_number() - b->elements[0].get_number()));
         r->elements.push_back(Value(a->elements[1].get_number() - b->elements[1].get_number()));
@@ -810,6 +821,7 @@ void register_builtins(VM& vm) {
     vm.define_native("vec2_scale", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_number()) return Value();
         auto* v = argv[0].as_array(); double s = argv[1].get_number();
+        if (v->elements.size() < 2) return Value();
         auto* r = allocate_array();
         r->elements.push_back(Value(v->elements[0].get_number() * s));
         r->elements.push_back(Value(v->elements[1].get_number() * s));
@@ -818,17 +830,20 @@ void register_builtins(VM& vm) {
     vm.define_native("vec2_dot", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
         auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        if (a->elements.size() < 2 || b->elements.size() < 2) return Value();
         return Value(a->elements[0].get_number() * b->elements[0].get_number() + a->elements[1].get_number() * b->elements[1].get_number());
     });
     vm.define_native("vec2_len", [](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_array()) return Value();
         auto* v = argv[0].as_array();
+        if (v->elements.size() < 2) return Value();
         double x = v->elements[0].get_number(), y = v->elements[1].get_number();
         return Value(std::sqrt(x * x + y * y));
     });
     vm.define_native("vec2_normalize", [](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_array()) return Value();
         auto* v = argv[0].as_array();
+        if (v->elements.size() < 2) return Value();
         double x = v->elements[0].get_number(), y = v->elements[1].get_number();
         double len = std::sqrt(x * x + y * y);
         if (len == 0) { auto* r = allocate_array(); r->elements.push_back(Value(0.0)); r->elements.push_back(Value(0.0)); return Value(static_cast<Obj*>(r)); }
@@ -838,6 +853,7 @@ void register_builtins(VM& vm) {
     vm.define_native("vec2_dist", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
         auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        if (a->elements.size() < 2 || b->elements.size() < 2) return Value();
         double dx = a->elements[0].get_number() - b->elements[0].get_number();
         double dy = a->elements[1].get_number() - b->elements[1].get_number();
         return Value(std::sqrt(dx * dx + dy * dy));
@@ -853,30 +869,38 @@ void register_builtins(VM& vm) {
     });
     vm.define_native("vec3_add", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
-        auto* a = argv[0].as_array(); auto* b = argv[1].as_array(); auto* r = allocate_array();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        if (a->elements.size() < 3 || b->elements.size() < 3) return Value();
+        auto* r = allocate_array();
         for (int i = 0; i < 3; i++) r->elements.push_back(Value(a->elements[i].get_number() + b->elements[i].get_number()));
         return Value(static_cast<Obj*>(r));
     });
     vm.define_native("vec3_sub", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
-        auto* a = argv[0].as_array(); auto* b = argv[1].as_array(); auto* r = allocate_array();
+        auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        if (a->elements.size() < 3 || b->elements.size() < 3) return Value();
+        auto* r = allocate_array();
         for (int i = 0; i < 3; i++) r->elements.push_back(Value(a->elements[i].get_number() - b->elements[i].get_number()));
         return Value(static_cast<Obj*>(r));
     });
     vm.define_native("vec3_scale", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_number()) return Value();
-        auto* v = argv[0].as_array(); double s = argv[1].get_number(); auto* r = allocate_array();
+        auto* v = argv[0].as_array(); double s = argv[1].get_number();
+        if (v->elements.size() < 3) return Value();
+        auto* r = allocate_array();
         for (int i = 0; i < 3; i++) r->elements.push_back(Value(v->elements[i].get_number() * s));
         return Value(static_cast<Obj*>(r));
     });
     vm.define_native("vec3_dot", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
         auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        if (a->elements.size() < 3 || b->elements.size() < 3) return Value();
         return Value(a->elements[0].get_number() * b->elements[0].get_number() + a->elements[1].get_number() * b->elements[1].get_number() + a->elements[2].get_number() * b->elements[2].get_number());
     });
     vm.define_native("vec3_cross", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
         auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        if (a->elements.size() < 3 || b->elements.size() < 3) return Value();
         double ax = a->elements[0].get_number(), ay = a->elements[1].get_number(), az = a->elements[2].get_number();
         double bx = b->elements[0].get_number(), by = b->elements[1].get_number(), bz = b->elements[2].get_number();
         auto* r = allocate_array();
@@ -886,21 +910,24 @@ void register_builtins(VM& vm) {
     vm.define_native("vec3_len", [](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_array()) return Value();
         auto* v = argv[0].as_array();
+        if (v->elements.size() < 3) return Value();
         double x = v->elements[0].get_number(), y = v->elements[1].get_number(), z = v->elements[2].get_number();
         return Value(std::sqrt(x * x + y * y + z * z));
     });
     vm.define_native("vec3_normalize", [](int argc, Value* argv) -> Value {
         if (argc < 1 || !argv[0].is_array()) return Value();
         auto* v = argv[0].as_array();
+        if (v->elements.size() < 3) return Value();
         double x = v->elements[0].get_number(), y = v->elements[1].get_number(), z = v->elements[2].get_number();
         double len = std::sqrt(x * x + y * y + z * z);
-        if (len == 0) return Value(static_cast<Obj*>(allocate_array()));
+        if (len == 0) { auto* r = allocate_array(); r->elements.push_back(Value(0.0)); r->elements.push_back(Value(0.0)); r->elements.push_back(Value(0.0)); return Value(static_cast<Obj*>(r)); }
         auto* r = allocate_array(); r->elements.push_back(Value(x / len)); r->elements.push_back(Value(y / len)); r->elements.push_back(Value(z / len));
         return Value(static_cast<Obj*>(r));
     });
     vm.define_native("vec3_dist", [](int argc, Value* argv) -> Value {
         if (argc < 2 || !argv[0].is_array() || !argv[1].is_array()) return Value();
         auto* a = argv[0].as_array(); auto* b = argv[1].as_array();
+        if (a->elements.size() < 3 || b->elements.size() < 3) return Value();
         double dx = a->elements[0].get_number() - b->elements[0].get_number();
         double dy = a->elements[1].get_number() - b->elements[1].get_number();
         double dz = a->elements[2].get_number() - b->elements[2].get_number();

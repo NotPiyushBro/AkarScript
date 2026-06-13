@@ -111,6 +111,7 @@ akar_Error akar_exec(akar_VM* vm, const char* source) {
         vm->error_buf = vm->vm.last_error();
         return AKAR_RUNTIME_ERROR;
     }
+    vm->error_buf.clear();
     return AKAR_OK;
 }
 
@@ -128,6 +129,7 @@ akar_Error akar_exec_file(akar_VM* vm, const char* path) {
             vm->error_buf = vm->vm.last_error();
             return AKAR_RUNTIME_ERROR;
         }
+        vm->error_buf.clear();
         return AKAR_OK;
     }
 
@@ -251,13 +253,64 @@ void akar_push_copy(akar_VM* vm, int index) {
 
 void akar_set_global(akar_VM* vm, const char* name) {
     Value val = pop_val(vm);
+    // If the global is a signal (from @export), update the signal's value
+    Value existing = vm->vm.get_global(name);
+    if (existing.is_signal()) {
+        ObjSignal* sig = existing.as_signal();
+        if (sig->native_setter) {
+            sig->native_setter(sig->export_userdata, val.is_number() ? val.get_number() : 0.0);
+        }
+        sig->value = val;
+        return;
+    }
     vm->vm.set_global(name, val);
 }
 
 akar_Type akar_get_global(akar_VM* vm, const char* name) {
     Value val = vm->vm.get_global(name);
+    // If it's a signal (from @export), unwrap to its value
+    if (val.is_signal()) {
+        ObjSignal* sig = val.as_signal();
+        if (sig->native_getter) {
+            val = Value(sig->native_getter(sig->export_userdata));
+        } else {
+            val = sig->value;
+        }
+    }
     push_val(vm, val);
     return akar_type(vm, -1);
+}
+
+// ─────────────────────────────────────────────────────────────
+// @export variables
+// ─────────────────────────────────────────────────────────────
+
+void akar_export_var(akar_VM* vm, const char* name,
+                     akar_ExportGetter getter,
+                     akar_ExportSetter setter,
+                     void* userdata) {
+    // Look up the global — it should be a signal created by @export
+    Value val = vm->vm.get_global(name);
+    if (!val.is_signal()) return;
+
+    ObjSignal* sig = val.as_signal();
+
+    // Store raw function pointers and userdata directly on the signal
+    sig->native_getter = getter;
+    sig->native_setter = setter;
+    sig->export_userdata = userdata;
+}
+
+int akar_export_count(akar_VM* vm) {
+    (void)vm;
+    return static_cast<int>(get_export_registry().size());
+}
+
+const char* akar_export_name(akar_VM* vm, int index) {
+    (void)vm;
+    auto& reg = get_export_registry();
+    if (index < 0 || index >= static_cast<int>(reg.size())) return "";
+    return reg[index].name.c_str();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -501,11 +554,9 @@ void akar_class_end(akar_ClassBuilder* cls) {
 
     // Register methods as native closures on the class
     for (auto& mb : cls->methods) {
-        // Capture the method function pointer and builder info
         auto method_fn = mb.method;
-        size_t ud_size = cls->userdata_size;
         auto* native = allocate_native(
-            [method_fn, ud_size](int argc, Value* argv) -> Value {
+            [vm, method_fn](int argc, Value* argv) -> Value {
                 // argv[0] should be the instance
                 if (argc < 1 || !argv[0].is_instance()) return Value();
                 auto* inst = argv[0].as_instance();
@@ -516,10 +567,20 @@ void akar_class_end(akar_ClassBuilder* cls) {
                     uint64_t raw = static_cast<uint64_t>(it->second.get_number());
                     std::memcpy(&self, &raw, sizeof(self));
                 }
-                // Create a temporary akar_VM wrapper (not ideal, but works)
-                // For method calls, we just pass nullptr as vm
-                // The method should only use the self pointer and args
-                return Value();
+                if (!self) return Value();
+                // Push self and args onto API stack
+                int stack_base = static_cast<int>(vm->stack.size());
+                vm->stack.push_back(argv[0]); // self
+                for (int i = 1; i < argc; i++) {
+                    vm->stack.push_back(argv[i]);
+                }
+                int nresults = method_fn(vm, self, argc - 1, stack_base + 1);
+                Value result;
+                if (nresults > 0) {
+                    result = vm->stack.back();
+                }
+                vm->stack.resize(stack_base);
+                return result;
             },
             mb.name);
         klass->methods[mb.name] = Value(static_cast<Obj*>(native));
@@ -549,14 +610,23 @@ void akar_class_end(akar_ClassBuilder* cls) {
         auto ctor_fn = cls->ctor;
         size_t ud_size = cls->userdata_size;
         auto* native = allocate_native(
-            [ctor_fn, ud_size](int argc, Value* argv) -> Value {
+            [vm, ctor_fn, ud_size](int argc, Value* argv) -> Value {
+                // argv[0] is the instance (pushed by VM's CALL handler)
+                if (argc < 1 || !argv[0].is_instance()) return Value();
+                auto* inst = argv[0].as_instance();
                 // Allocate userdata
                 void* ud = ::operator new(ud_size);
                 std::memset(ud, 0, ud_size);
-                // Store pointer in a number
+                // Store pointer in instance's __ud field
                 uint64_t raw;
                 std::memcpy(&raw, &ud, sizeof(ud));
-                return Value(static_cast<double>(raw));
+                inst->fields["__ud"] = Value(static_cast<double>(raw));
+                // Call the user's ctor callback (user args start at argv[1])
+                int stack_base = static_cast<int>(vm->stack.size());
+                for (int i = 1; i < argc; i++) vm->stack.push_back(argv[i]);
+                ctor_fn(vm, ud, argc - 1, stack_base);
+                vm->stack.resize(stack_base);
+                return Value();
             },
             "init");
         klass->methods["init"] = Value(static_cast<Obj*>(native));

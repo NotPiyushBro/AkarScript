@@ -74,6 +74,7 @@ const char* token_type_name(TokenType type) {
         case TokenType::Colon: return ":";
         case TokenType::Semicolon: return ";";
         case TokenType::Arrow: return "->";
+        case TokenType::At: return "@";
         case TokenType::Eof: return "EOF";
         case TokenType::Error: return "Error";
     }
@@ -149,6 +150,7 @@ Token Lexer::next_token() {
         case '|': return match('|') ? make_token(TokenType::PipePipe) : make_token(TokenType::Pipe);
         case '^': return make_token(TokenType::Caret);
         case '~': return make_token(TokenType::Tilde);
+        case '@': return make_token(TokenType::At);
         default:
             return error_token("Unexpected character");
     }
