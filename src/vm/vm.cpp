@@ -2151,7 +2151,10 @@ InterpretResult VM::run() {
             }
             case Opcode::JMP: {
                 int16_t offset = static_cast<int16_t>((wb << 8) | wc);
-                ip += offset;  // ip already advanced by WIDE_INST_SIZE at top of handler
+                // ip was advanced by WIDE_INST_SIZE (8) at top of handler.
+                // The offset was adjusted by patch_jump to be relative to (wip + 8).
+                // So target = wip + 8 + offset = ip + offset.
+                ip += offset;
                 if (offset < 0) {
                     CHECK_MEMORY_LIMIT();
                     if (yield_pending_) HANDLE_FIBER_YIELD();
@@ -2160,6 +2163,8 @@ InterpretResult VM::run() {
             }
             case Opcode::JMP_IF_FALSE: {
                 int16_t offset = static_cast<int16_t>((wb << 8) | wc);
+                // ip was advanced by WIDE_INST_SIZE (8) at top of handler.
+                // The offset was adjusted by patch_jump to be relative to (wip + 8).
                 if (!S(wa).is_truthy()) {
                     ip += offset;
                 }
@@ -2167,6 +2172,8 @@ InterpretResult VM::run() {
             }
             case Opcode::JMP_IF_TRUE: {
                 int16_t offset = static_cast<int16_t>((wb << 8) | wc);
+                // ip was advanced by WIDE_INST_SIZE (8) at top of handler.
+                // The offset was adjusted by patch_jump to be relative to (wip + 8).
                 if (S(wa).is_truthy()) {
                     ip += offset;
                 }
@@ -2446,7 +2453,8 @@ InterpretResult VM::run() {
                 }
                 yield_pending_ = true;
                 yield_value_ = S(wa);
-                break;
+                // Next DISPATCH will handle the actual yield via HANDLE_FIBER_YIELD
+                goto loop_continue;
             }
             case Opcode::FIBER_RESUME: {
                 // Save caller's IP before switching to fiber frame
@@ -2787,31 +2795,41 @@ InterpretResult VM::run() {
             // Fused compare-branch opcodes (WIDE: A:16=reg1, B:16=reg2, C:16=signed_offset)
             case Opcode::JMP_IF_NOT_LT: {
                 int16_t offset = static_cast<int16_t>(wc);
-                if (!(S(wa).get_number() < S(wb).get_number())) ip += offset;
+                // ip was advanced by WIDE_INST_SIZE (8) at top of handler.
+                // The offset is relative to the WIDE instruction start (wip).
+                if (!(S(wa).get_number() < S(wb).get_number())) ip += offset - WIDE_INST_SIZE;
                 if (offset < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
                 break;
             }
             case Opcode::JMP_IF_NOT_LTE: {
                 int16_t offset = static_cast<int16_t>(wc);
-                if (!(S(wa).get_number() <= S(wb).get_number())) ip += offset;
+                // ip was advanced by WIDE_INST_SIZE (8) at top of handler.
+                // The offset is relative to the WIDE instruction start (wip).
+                if (!(S(wa).get_number() <= S(wb).get_number())) ip += offset - WIDE_INST_SIZE;
                 if (offset < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
                 break;
             }
             case Opcode::JMP_IF_NOT_GT: {
                 int16_t offset = static_cast<int16_t>(wc);
-                if (!(S(wa).get_number() > S(wb).get_number())) ip += offset;
+                // ip was advanced by WIDE_INST_SIZE (8) at top of handler.
+                // The offset is relative to the WIDE instruction start (wip).
+                if (!(S(wa).get_number() > S(wb).get_number())) ip += offset - WIDE_INST_SIZE;
                 if (offset < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
                 break;
             }
             case Opcode::JMP_IF_NOT_GTE: {
                 int16_t offset = static_cast<int16_t>(wc);
-                if (!(S(wa).get_number() >= S(wb).get_number())) ip += offset;
+                // ip was advanced by WIDE_INST_SIZE (8) at top of handler.
+                // The offset is relative to the WIDE instruction start (wip).
+                if (!(S(wa).get_number() >= S(wb).get_number())) ip += offset - WIDE_INST_SIZE;
                 if (offset < 0) { CHECK_MEMORY_LIMIT(); if (yield_pending_) HANDLE_FIBER_YIELD(); }
                 break;
             }
             case Opcode::JMP_IF_NOT_EQ: {
                 int16_t offset = static_cast<int16_t>(wc);
-                if (!(S(wa) == S(wb))) ip += offset;
+                // ip was advanced by WIDE_INST_SIZE (8) at top of handler.
+                // The offset is relative to the WIDE instruction start (wip).
+                if (!(S(wa) == S(wb))) ip += offset - WIDE_INST_SIZE;
                 if (offset < 0) { CHECK_MEMORY_LIMIT(); }
                 break;
             }

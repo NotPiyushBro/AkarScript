@@ -22,7 +22,7 @@ cmake-build-*/
 .opencode.json
 .windsurfrules
 
-# AI assistant files
+# Config files
 CLAUDE.md
 GEMINI.md
 AGENTS.md
